@@ -1,6 +1,7 @@
 # A swarm manager with no site.
 name: worker.example.com
 env: prod
+ssh: [admins]
 swarm:
   cluster: jobs
   role: manager

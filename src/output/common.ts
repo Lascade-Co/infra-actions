@@ -22,7 +22,7 @@ export const KIND_LABEL: Record<ResourceKind, string> = {
   droplet: "Droplets",
   "droplet-tags": "Droplet tags",
   "infra-target": "SSH targets",
-  "infra-app": "SSH Access app",
+  "infra-app": "SSH Access apps",
   "access-app": "Site Access apps",
   "tunnel-ingress": "Tunnel routes",
   "dns-record": "DNS records",

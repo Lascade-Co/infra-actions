@@ -37,7 +37,6 @@ export function testAccount(over: Partial<AccountConfig["cloudflare"]> = {}): Ac
       zones: ["example.com", "example.net", "example.org"],
       tunnels: { nyc1: T_NYC1, blr1: T_BLR1, sfo3: T_SFO3 },
       staff_policy_id: STAFF_POLICY,
-      ssh_admin_emails: [...ADMINS],
       service_tokens: { "ci-staging": STAGING_TOKEN, etl: ETL_TOKEN, uptime: UPTIME_TOKEN },
       ci_deploy_tokens: { prod: [], staging: ["ci-staging"], internal: [] },
       guards: { max_deletes: 20, max_delete_fraction: 0.3 },
@@ -46,6 +45,8 @@ export function testAccount(over: Partial<AccountConfig["cloudflare"]> = {}): Ac
     digitalocean: { regions: { prod: "nyc1", staging: "blr1", internal: "blr1" } },
     github: { infra_repo: "example-org/infra", ssh_config_branch: "ssh-config", ssh_config_file: "ssh_config" },
     ssh_config: { title: "Example Co droplets", user: "ubuntu" },
+    ssh_email_domain: "example.com",
+    ssh_groups: { admins: [...ADMINS] },
   };
 }
 
@@ -108,6 +109,8 @@ export class FakeCloudflare {
   noFile = new Set<string>();
   /** Droplet files marked frozen. */
   frozen = new Set<string>();
+  /** A droplet file's ssh list, by droplet name; default ["admins"] (= ADMINS, the Worker's admins). */
+  ssh: Record<string, string[]> = {};
   /** Droplet files with a profile for a droplet that does not exist yet (status create): name -> env. */
   toCreate: Record<string, { env: "prod" | "staging" | "internal"; tags?: string[] }> = {};
 
@@ -317,6 +320,7 @@ function fileFor(f: FakeCloudflare, name: string, tags: string[]): DropletFile {
     ...(envs[0] ? { env: envs[0] } : {}),
     deploy: tags.includes("ci-deploy"),
     frozen: f.frozen.has(name),
+    ssh: f.ssh[name] ?? ["admins"],
     ...(web ? { web } : {}),
     allow: { droplet: [], tunnel, ip: [] },
   };

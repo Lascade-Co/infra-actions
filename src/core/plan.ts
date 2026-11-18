@@ -70,6 +70,17 @@ export interface PlanOp {
   ids?: Record<string, string>;
   /** True while a value in `after` is KNOWN_AFTER_CREATE; apply re-plans before performing it. */
   pending?: boolean;
+  /**
+   * cloudflare infra-target ops whose change alters who may SSH into the droplet (decision 18):
+   * the people and usernames before and after. Shown in the PR comment, never sent to an API.
+   */
+  sshAccess?: { before: SshAccess; after: SshAccess };
+}
+
+/** Who may SSH into a droplet through the infrastructure apps, and as which users. Sorted. */
+export interface SshAccess {
+  emails: string[];
+  usernames: string[];
 }
 
 /** What one module's diff returns. */

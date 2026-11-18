@@ -4,6 +4,7 @@ name: db.example.com
 description: Analytics database (example)
 env: prod
 frozen: true
+ssh: [admins]
 monitors: []
 allow:
   droplet:

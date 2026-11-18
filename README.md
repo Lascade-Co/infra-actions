@@ -72,9 +72,9 @@ The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops
 
 | Module | What it manages | Notes |
 |---|---|---|
-| `checks` (B2) | rules beyond the schema: names in an account zone, references between files, service tokens, UDP routes, swarm rules, removed files | pure; errors block check and apply |
+| `checks` (B2) | rules beyond the schema: names in an account zone, references between files, service tokens, SSH groups and email domain, UDP routes, swarm rules, removed files | pure; errors block check and apply |
 | `droplets` (B4) | creates droplets from profiles; writes the managed tags (`env-*`, `ci-deploy`, `web-staff`, `web-public`) | create-only; other tags never touched |
-| `cloudflare` (B1) | SSH targets and the SSH Access app, private (`vpc-`) names, sites (DNS, tunnel routes, Access apps), `allow.tunnel` routes | port of the Worker's reconcile; delete guard rails; UDP routes and port ranges are reported, not built |
+| `cloudflare` (B1) | SSH targets and one SSH Access app per access set, private (`vpc-`) names, sites (DNS, tunnel routes, Access apps), `allow.tunnel` routes | port of the Worker's reconcile; delete guard rails; UDP routes and port ranges are reported, not built |
 | `firewall` (B3) | what `allow:` and `swarm:` imply for the DigitalOcean firewalls | report-only until migration Phase 5 |
 | `oneuptime` (B5) | one HTTP monitor per site hostname (or per `monitors:` entry) | down only after 3 failing minutes; owned monitors are never deleted, only reported |
 | `sshconfig` (B6) | the generated ssh config and its README on the `ssh-config` branch | the branch holds nothing else |
@@ -97,6 +97,7 @@ profile: ubuntu-6               # only for droplets the tool creates; adopted dr
 env: prod                       # prod | staging | internal -> tag env-<env>; new droplets go to that env's region
 deploy: true                    # Deploy target (tag ci-deploy): CI may SSH in with the env's deploy token
 frozen: false                   # true: plans show its changes, apply skips them
+ssh: [admins, someone@example.com]  # required: who may SSH in, always as ubuntu (groups from account.yaml, emails)
 
 web:                            # the site, through the tunnel (replaces web-staff/web-public + web-config.json)
   exposure: public              # staff (login everywhere) | public (login on protected paths)
@@ -136,7 +137,15 @@ swarm:                          # Docker Swarm membership; the tool derives the 
   encrypted_overlay: false      # members must agree
 ```
 
-Only `name` is required. A minimal adopted droplet is just `name: build.example.com`, with `env` if it has one.
+Only `name` and `ssh` are required. A minimal adopted droplet is `name: build.example.com` and `ssh: [admins]`, with `env` if it has one.
+
+### SSH access
+
+`ssh:` is the droplet's SSH access list (decision 18): at least one entry, each a group name from `account.yaml` `ssh_groups` or an email address in `account.yaml` `ssh_email_domain`. People on the list log in as `ubuntu` only. Root is reached only through the DigitalOcean web console. The checks fail (and block the apply) on a missing or empty list, an unknown group, an empty group, or an email outside `ssh_email_domain`, in a droplet file or in a group.
+
+In Cloudflare, the droplets that resolve to the same people (groups expanded, emails lowercased, sorted, deduplicated) share one Access for Infrastructure app, `infra-sync: SSH <set id>`. Each droplet's infrastructure target carries the tag `ssh-access: <set id>`, and its app selects port 22 of the targets with that tag. The set id is the first 12 hex digits of the SHA-256 of the sorted email list. The droplet's `ssh-` route app lets in the same people. The PR comment shows, per droplet, who gains and who loses SSH, and says once when root login goes away.
+
+This replaces the Worker's single app (`infra-sync: SSH targets`: every admin on every droplet, as `ubuntu` or `root`). The tool owns it by its name prefix and deletes it once every target it covers carries a wanted set's tag. The apply creates the set apps first, then retags the targets (each retag waits for its set's app), then deletes the apps no set wants. A frozen droplet or a droplet that isn't managed this run keeps the app it relies on, with a warning.
 
 ### Profiles and account config
 
@@ -145,7 +154,6 @@ Only `name` is required. A minimal adopted droplet is just `name: build.example.
   - the Cloudflare account id, team domain and zones;
   - the tunnel per region;
   - the staff policy id;
-  - the SSH admin emails;
   - the service tokens by name;
   - the CI deploy tokens per env;
   - the delete guard rails;
@@ -153,7 +161,16 @@ Only `name` is required. A minimal adopted droplet is just `name: build.example.
   - the OneUptime project;
   - the `infra` repo and its ssh-config branch;
   - the Telegram chat;
-  - the ssh config title.
+  - the ssh config title;
+  - `ssh_email_domain`, the only email domain allowed in SSH lists (e.g. `example.com`);
+  - `ssh_groups`, the SSH groups by name, each a non-empty list of emails in that domain:
+
+    ```
+    ssh_email_domain: example.com
+    ssh_groups:
+      admins: [admin@example.com, ops@example.com]
+      shop-team: [dev@example.com]
+    ```
 
   It holds no secrets.
 

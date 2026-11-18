@@ -9,9 +9,6 @@ cloudflare:
     nyc1: 00000000-0000-4000-8000-000000000001
     blr1: 00000000-0000-4000-8000-000000000002
   staff_policy_id: 00000000-0000-4000-8000-000000000010
-  ssh_admin_emails:
-    - admin@example.com
-    - ops@example.com
   service_tokens:
     ci-prod: 00000000-0000-4000-8000-000000000101
     ci-staging: 00000000-0000-4000-8000-000000000102
@@ -49,3 +46,13 @@ telegram:
 ssh_config:
   title: Example Co droplets
   user: ubuntu
+
+# Who may SSH (decision 18). A droplet file's `ssh:` names these groups and/or single emails;
+# every email must be in ssh_email_domain. Login is always as ubuntu.
+ssh_email_domain: example.com
+ssh_groups:
+  admins:
+    - admin@example.com
+    - ops@example.com
+  shop-team:
+    - dev@example.com

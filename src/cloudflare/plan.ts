@@ -3,7 +3,9 @@
 // The input changes from DigitalOcean tags + web-config.json to the desired state built from the
 // droplet files (adaptDroplets below). Everything after the adapter follows the Worker step by
 // step, so that a plan against what the Worker built shows no change (phase D). New here:
-// allow.tunnel routes (planRoutes) and exceptions with service tokens (bodies.ts).
+// allow.tunnel routes (planRoutes) and exceptions with service tokens (bodies.ts), and per-droplet
+// SSH access (decision 18): one infrastructure app per distinct access set in place of the
+// Worker's single app, targets tagged with their set, each ssh- app for the droplet's own list.
 
 import {
   CI_DEPLOY_TAG,
@@ -13,6 +15,7 @@ import {
   KNOWN_AFTER_CREATE,
   NAME_PREFIX,
   RESERVED_PREFIXES,
+  SSH_ACCESS_TAG_KEY,
   TARGET_TAG_KEY,
   TARGET_TAG_VALUE,
   WEB_ADMIN_APP_PREFIX,
@@ -27,6 +30,7 @@ import { normPath } from "../core/values.js";
 import {
   type AppBody,
   appBody,
+  appSelects,
   appDestinations,
   appDomains,
   type DnsBody,
@@ -34,11 +38,11 @@ import {
   healthAppBody,
   type InfraAppBody,
   infraAppBody,
-  isInfraApp,
   isLink,
   isOwnedApp,
   isOwnedDns,
   isOwnedHealthApp,
+  isOwnedInfraApp,
   isOwnedRouteApp,
   isOwnedTarget,
   isOwnedVpcDns,
@@ -49,7 +53,11 @@ import {
   normCriteria,
   normPolicies,
   routeAppBody,
+  sameTags,
   sameWebApp,
+  sshAccessOf,
+  sshAccessSetId,
+  type SshAccessView,
   type TargetBody,
   targetBody,
   type VpcBody,
@@ -85,8 +93,6 @@ export interface Snapshot {
 
 /** The Worker's SyncConfig, from account.yaml. */
 export interface Cfg {
-  /** Lowercase, deduplicated, sorted (the Worker's parseEmails). */
-  adminEmails: string[];
   /** Service token ids per environment, deduplicated and sorted (the Worker's CI_SERVICE_TOKEN_IDS). */
   ciTokens: Record<EnvName, string[]>;
   /** Lowercase. */
@@ -182,6 +188,13 @@ export interface HostPlan {
   sshHostname: string;
   env?: EnvName;
   target: { op: Op; existingId?: string; existing?: InfraTarget; body: TargetBody };
+  /** The droplet's SSH access list, resolved (lowercase, sorted), and its set id (the ssh-access tag). */
+  sshEmails: string[];
+  setId: string;
+  /** Frozen droplet: its ops become report ops, so its target keeps its current tags. */
+  frozen: boolean;
+  /** Who may SSH into the droplet through the infrastructure apps now and after this apply, when that changes. */
+  access?: { before: SshAccessView; after: SshAccessView };
   /** Set when something on the ssh- hostname belongs to someone else or cannot be read: then only the target is managed. */
   hostnameBlocked?: string;
   app?: { op: Op; existingId?: string; existing?: AccessApp; body: AppBody };
@@ -209,6 +222,28 @@ export interface RouteReport {
   port: string;
   who: Who[];
   reason: string;
+}
+
+/** One SSH access set's infrastructure app. */
+export interface InfraAppPlan {
+  setId: string;
+  emails: string[];
+  /** The droplets in this set, sorted. */
+  droplets: string[];
+  op: Op;
+  existingId?: string;
+  existing?: AccessApp;
+  body: InfraAppBody;
+}
+
+/** An infrastructure app the tool owns that no set wants (the Worker's single app, an unused set, a duplicate). */
+export interface StaleInfraApp {
+  app: AccessApp;
+  /**
+   * Targets that would be left with no infrastructure app if it went (frozen droplets, droplets not
+   * managed this run): the app is kept and reported. Empty: it is deleted.
+   */
+  keptFor: string[];
 }
 
 export interface StaleIngress {
@@ -252,7 +287,9 @@ export interface Plan {
   deletionBlockReason?: string;
   deleteCount: number;
   ownedCount: number;
-  infraApp: { op: Op; existingId?: string; existing?: AccessApp; body: InfraAppBody };
+  /** One per distinct SSH access set, sorted by set id. */
+  infraApps: InfraAppPlan[];
+  staleInfraApps: StaleInfraApp[];
   diagnostics: Diag[];
   dependents: Dependent[];
   readErrors: boolean;
@@ -288,7 +325,6 @@ export function cfgFrom(account: AccountConfig): Cfg {
   const cf = account.cloudflare;
   const ids = (names: readonly string[] | undefined) => [...new Set((names ?? []).flatMap((n) => (cf.service_tokens[n] ? [cf.service_tokens[n]!] : [])))].sort();
   return {
-    adminEmails: [...new Set(cf.ssh_admin_emails.map((e) => e.trim().toLowerCase()).filter(Boolean))].sort(),
     ciTokens: { prod: ids(cf.ci_deploy_tokens.prod), staging: ids(cf.ci_deploy_tokens.staging), internal: ids(cf.ci_deploy_tokens.internal) },
     staffPolicyId: cf.staff_policy_id.trim().toLowerCase(),
     maxDeletes: cf.guards.max_deletes,
@@ -361,6 +397,8 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     tokenIds: string[];
     ciDeploy: boolean;
     tags: string[];
+    sshEmails: string[];
+    frozen: boolean;
     drop: Drop;
     pending: boolean;
   };
@@ -387,6 +425,14 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     const ip = d.privateIp;
     if (!ip) {
       skipped(d.name, "no private IPv4 yet (networks.v4[type=private])");
+      heldNames.add(d.name);
+      heldHostnames.add(f.sshHostname);
+      heldVpcNames.add(f.vpcHostname);
+      continue;
+    }
+    if (!d.dd.sshEmails.length) {
+      // The checks reject this (an unknown group); never build an app that lets no one in.
+      skipped(d.name, "its ssh list names no one (an unknown group?); its SSH target and Access apps are left as they are");
       heldNames.add(d.name);
       heldHostnames.add(f.sshHostname);
       heldVpcNames.add(f.vpcHostname);
@@ -419,6 +465,8 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       tokenIds,
       ciDeploy: tags.includes(CI_DEPLOY_TAG),
       tags,
+      sshEmails: d.dd.sshEmails,
+      frozen: d.dd.frozen,
       drop: d,
       pending: d.pending,
     });
@@ -456,7 +504,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
   }
   const foreignAppHosts = new Map<string, string>();
   for (const a of snap.apps) {
-    if (isOwnedApp(a) || isInfraApp(a)) continue;
+    if (isOwnedApp(a) || isOwnedInfraApp(a)) continue;
     for (const h of appDomains(a)) foreignAppHosts.set(h, a.name ?? a.id);
   }
 
@@ -534,7 +582,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       heldHostnames.add(c.sshHostname);
       continue;
     }
-    const tBody = targetBody(c.name, c.privateIp);
+    const setId = sshAccessSetId(c.sshEmails);
     // A renamed droplet keeps its private IP: update its target in place (a second target with the
     // same IP is refused by the API), unless a droplet with the old name still exists.
     const existingT =
@@ -545,9 +593,10 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
             (t) => t.ip?.ipv4?.ip_addr === c.privateIp && !unique.some((u) => lc(u.name) === lc(t.hostname)) && !heldNames.has(t.hostname),
           ));
     if (existingT) claimedTargetIds.add(existingT.id);
+    const tBody = targetBody(c.name, c.privateIp, setId, existingT?.tags);
     const target: HostPlan["target"] = !existingT
       ? { op: "create", body: tBody }
-      : existingT.ip?.ipv4?.ip_addr !== c.privateIp || existingT.hostname !== c.name
+      : existingT.ip?.ipv4?.ip_addr !== c.privateIp || existingT.hostname !== c.name || !sameTags(existingT.tags, tBody.tags)
         ? { op: "update", existingId: existingT.id, existing: existingT, body: tBody }
         : { op: "noop", existingId: existingT.id, existing: existingT, body: tBody };
 
@@ -561,6 +610,9 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       sshHostname: c.sshHostname,
       ...(c.env ? { env: c.env } : {}),
       target,
+      sshEmails: c.sshEmails,
+      setId,
+      frozen: c.frozen,
       ingressService: `ssh://${c.privateIp}:22`,
       pending: c.pending,
     };
@@ -586,7 +638,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       continue;
     }
 
-    const aBody = appBody(h, cfg.adminEmails, c.tokenIds, c.env);
+    const aBody = appBody(h, c.sshEmails, c.tokenIds, c.env);
     const existingA = ownedAppByHost.get(h)?.[0];
     if (!existingA) hp.app = { op: "create", body: aBody };
     else {
@@ -763,8 +815,14 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     else staleTargets.push(...unclaimed(list.slice(1))); // duplicates
   }
 
+  // 6a. Infrastructure apps (decision 18): one per distinct SSH access set, selecting its targets by
+  // the ssh-access tag, for those people as ubuntu only. Planned before the deletion guard, since
+  // the apps no set wants count as deletes.
+  const infra = planInfraApps(snap, hosts, ownedTargets, claimedTargetIds, staleTargets, warn);
+
   // 6. Deletion safety
   const deleteCount =
+    infra.deletes.length +
     staleDns.length +
     staleIngress.length +
     staleApps.length +
@@ -786,7 +844,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
   let ownedVpcCount = 0;
   for (const list of vpcByName.values()) ownedVpcCount += list.filter((x) => isOwnedVpcDns(x.record)).length;
   const ownedCount =
-    ownedApps.length + ownedTargets.length + ownedIngressCount + ownedDnsCount + ownedVpcCount + ownedHealth.length + web.ownedCount + routes.ownedCount;
+    ownedApps.length + infra.owned.length + ownedTargets.length + ownedIngressCount + ownedDnsCount + ownedVpcCount + ownedHealth.length + web.ownedCount + routes.ownedCount;
 
   // Which droplets the deletions belong to, keyed "<flattened label>.<zone>" so a droplet's ssh-,
   // vpc-, target, healthcheck and site objects share one key.
@@ -808,6 +866,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
   for (const x of routes.staleRouteDns) deleteOwners.add(`route ${lc(x.record.name)}`);
   for (const x of routes.staleRouteIngress) deleteOwners.add(`route ${x.hostname}`);
   for (const a of routes.staleRouteApps) for (const d of appDomains(a)) deleteOwners.add(`route ${d}`);
+  for (const a of infra.deletes) deleteOwners.add(`infra-app ${a.name ?? a.id}`);
 
   let deletionBlockReason: string | undefined;
   if (tunnelErrors.size || dnsErrors.size || vpcErrors.size || web.dnsErrorZones.size) {
@@ -830,14 +889,17 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
   // failure is already an error above.
   if (deletionBlockReason && deleteCount > 0) diag("warning", "cloudflare-guard", deletionBlockReason);
 
-  // 7. Infrastructure app
-  const iBody = infraAppBody(cfg.adminEmails);
-  const existingI = snap.apps.find(isInfraApp);
-  const infraApp: Plan["infraApp"] = !existingI
-    ? { op: "create", body: iBody }
-    : normCriteria(existingI.target_criteria) === normCriteria(iBody.target_criteria) && normPolicies(existingI.policies) === normPolicies(iBody.policies)
-      ? { op: "noop", existingId: existingI.id, existing: existingI, body: iBody }
-      : { op: "update", existingId: existingI.id, existing: existingI, body: { ...iBody, policies: withPolicyIds(iBody.policies, existingI.policies) } };
+  // 7. Who may SSH into each droplet now and after this apply (the PR comment shows the change).
+  // Unwanted apps stay when they are kept for a target, and all of them when deletions are blocked.
+  const appsAfter: AccessApp[] = [
+    ...infra.apps.map((p) => ({ id: p.existingId ?? "", ...p.body }) as AccessApp),
+    ...infra.stale.filter((x) => x.keptFor.length || deletionBlockReason).map((x) => x.app),
+  ];
+  for (const h of hosts) {
+    const before = h.target.existing ? sshAccessOf(infra.owned.filter((a) => appSelects(a, h.target.existing!.tags))) : { emails: [], usernames: [] };
+    const after = sshAccessOf(appsAfter.filter((a) => appSelects(a, h.target.body.tags)));
+    if (JSON.stringify(before) !== JSON.stringify(after)) h.access = { before, after };
+  }
 
   return {
     hosts,
@@ -867,10 +929,96 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     readErrors: !!(tunnelErrors.size || dnsErrors.size || vpcErrors.size || web.dnsErrorZones.size),
     deleteCount,
     ownedCount,
-    infraApp,
+    infraApps: infra.apps,
+    staleInfraApps: infra.stale,
     diagnostics,
     ownerOf: web.ownerOf,
   };
+}
+
+// ---------- 6a. infrastructure apps ----------
+
+interface InfraResult {
+  apps: InfraAppPlan[];
+  stale: StaleInfraApp[];
+  /** Stale apps to delete (no target relies on them). */
+  deletes: AccessApp[];
+  /** Every infrastructure app the tool owns. */
+  owned: AccessApp[];
+}
+
+/**
+ * The wanted apps (one per set the managed droplets use) and the owned ones no set wants. An
+ * unwanted app is deleted only when no target would be left without an app: every owned target
+ * that remains after this apply must carry the ssh-access tag of a wanted set. Frozen droplets keep
+ * their current tags (their ops are report-only) and targets of droplets not managed this run keep
+ * theirs, so the app they rely on (the Worker's single app, or an old set's app) is kept and reported.
+ * Apply order (ops.ts): wanted apps first, then targets (each retag waits for its set's app), then
+ * the deletes, after every app and target op of the run succeeded.
+ */
+function planInfraApps(
+  snap: Snapshot,
+  hosts: HostPlan[],
+  ownedTargets: InfraTarget[],
+  claimedTargetIds: Set<string>,
+  staleTargets: InfraTarget[],
+  warn: (message: string, droplet?: string) => void,
+): InfraResult {
+  const owned = snap.apps.filter(isOwnedInfraApp);
+  const sets = new Map<string, { emails: string[]; droplets: string[] }>();
+  for (const h of hosts) {
+    const set = sets.get(h.setId) ?? { emails: h.sshEmails, droplets: [] };
+    set.droplets.push(h.name);
+    sets.set(h.setId, set);
+  }
+  const apps: InfraAppPlan[] = [];
+  const managed = new Set<string>();
+  for (const setId of [...sets.keys()].sort()) {
+    const set = sets.get(setId)!;
+    const body = infraAppBody(setId, set.emails);
+    const existing = owned.find((a) => a.name === body.name);
+    const base = { setId, emails: set.emails, droplets: [...set.droplets].sort() };
+    if (!existing) {
+      apps.push({ ...base, op: "create", body });
+      continue;
+    }
+    managed.add(existing.id);
+    const same = normCriteria(existing.target_criteria) === normCriteria(body.target_criteria) && normPolicies(existing.policies) === normPolicies(body.policies);
+    apps.push(
+      same
+        ? { ...base, op: "noop", existingId: existing.id, existing, body }
+        : { ...base, op: "update", existingId: existing.id, existing, body: { ...body, policies: withPolicyIds(body.policies, existing.policies) } },
+    );
+  }
+
+  // Every owned target as it will be after this apply. A target this apply creates gets its set's
+  // tag, and its set's app is created first; a deleted target needs no app (if deletions are
+  // blocked, nothing is deleted, so nothing loses an app either).
+  const gone = new Set(staleTargets.map((t) => t.id));
+  const remaining: Array<{ label: string; tags: Record<string, string> | undefined }> = [];
+  for (const h of hosts) {
+    if (!h.target.existing) continue;
+    remaining.push(h.frozen ? { label: `${h.name} (frozen)`, tags: h.target.existing.tags } : { label: h.name, tags: h.target.body.tags });
+  }
+  for (const t of ownedTargets) {
+    if (claimedTargetIds.has(t.id) || gone.has(t.id)) continue;
+    remaining.push({ label: `${t.hostname} (not managed this run)`, tags: t.tags });
+  }
+  const uncovered = remaining.filter((t) => !sets.has(t.tags?.[SSH_ACCESS_TAG_KEY] ?? ""));
+
+  const stale: StaleInfraApp[] = [];
+  for (const a of owned) {
+    if (managed.has(a.id)) continue;
+    const keptFor = uncovered.filter((t) => appSelects(a, t.tags)).map((t) => t.label);
+    stale.push({ app: a, keptFor });
+    if (keptFor.length) {
+      warn(
+        `Access app "${a.name}" is kept: SSH to ${keptFor.join(", ")} still goes only through it. ` +
+          "It is removed once their targets are tagged with their own SSH access set (unfreeze the droplet, or fix what holds it)",
+      );
+    }
+  }
+  return { apps, stale, deletes: stale.filter((x) => !x.keptFor.length).map((x) => x.app), owned };
 }
 
 function dnsErrorZonesOf(snap: Snapshot): Set<string> {

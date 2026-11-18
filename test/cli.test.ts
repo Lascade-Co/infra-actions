@@ -94,7 +94,7 @@ describe("cli", () => {
     try {
       const { cp, writeFile } = await import("node:fs/promises");
       await cp(EXAMPLE_DIR, t.dir, { recursive: true });
-      await writeFile(join(t.dir, "droplets", "secret-host.example.com.yaml"), "name: other-secret-host.example.com\nallow:\n  ip:\n    - from: 192.0.2.77\n      ports: [22]\n");
+      await writeFile(join(t.dir, "droplets", "secret-host.example.com.yaml"), "name: other-secret-host.example.com\nssh: [admins]\nallow:\n  ip:\n    - from: 192.0.2.77\n      ports: [22]\n");
       const { io: x, stdout, stderr } = io();
       const out = join(dir, "report.md");
       const code = await main(["validate", t.dir, "--out", out], x);

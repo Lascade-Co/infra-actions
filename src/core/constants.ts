@@ -16,10 +16,19 @@ export const TARGET_TAG_VALUE = "infra-sync";
 
 // ---------- Cloudflare object names (the Worker's, unchanged) ----------
 
-/** The one infrastructure app covering every target tagged managed-by=infra-sync. */
-export const INFRA_APP_NAME = "infra-sync: SSH targets";
-/** SSH usernames allowed by the infrastructure app's policy. */
-export const SSH_USERNAMES: readonly string[] = ["ubuntu", "root"];
+/**
+ * Access for Infrastructure apps (decision 18): one per distinct SSH access set, named
+ * "infra-sync: SSH <set id>", covering the targets tagged SSH_ACCESS_TAG_KEY=<set id>. Every
+ * infrastructure app whose name starts with this prefix is the tool's, including the Worker's
+ * single app (LEGACY_INFRA_APP_NAME), which is removed once every target is covered by a set app.
+ */
+export const INFRA_APP_PREFIX = "infra-sync: SSH ";
+/** The Worker's one infrastructure app (every target tagged managed-by=infra-sync, as ubuntu and root). */
+export const LEGACY_INFRA_APP_NAME = "infra-sync: SSH targets";
+/** Target tag naming the target's SSH access set (value: the set id). */
+export const SSH_ACCESS_TAG_KEY = "ssh-access";
+/** The only SSH username the infrastructure apps allow. Root only through the DigitalOcean web console. */
+export const SSH_USERNAME = "ubuntu";
 /** Public Bypass app on <droplet name>/<HEALTH_BYPASS_PATH> for every Deploy target. */
 export const HEALTH_APP_PREFIX = "infra-sync: healthcheck ";
 export const HEALTH_BYPASS_PATH = "healthcheck";

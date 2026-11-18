@@ -32,9 +32,9 @@ describe("checkConfig", () => {
 
   it("reports a name outside the account zones and flattened-name collisions", async () => {
     const c = await config({
-      "droplets/build.example.org.yaml": "name: build.example.org\n",
-      "droplets/a.b.example.com.yaml": "name: a.b.example.com\n",
-      "droplets/a-b.example.com.yaml": "name: a-b.example.com\n",
+      "droplets/build.example.org.yaml": "name: build.example.org\nssh: [admins]\n",
+      "droplets/a.b.example.com.yaml": "name: a.b.example.com\nssh: [admins]\n",
+      "droplets/a-b.example.com.yaml": "name: a-b.example.com\nssh: [admins]\n",
     });
     const ds = checkConfig(c);
     expect(pick(ds)).toEqual([
@@ -46,8 +46,8 @@ describe("checkConfig", () => {
   });
 
   it("allows a multi-level droplet name without a site, but not as a site hostname", async () => {
-    expect(checkConfig(await config({ "droplets/staging.app.example.com.yaml": "name: staging.app.example.com\n" }))).toEqual([]);
-    const ds = checkConfig(await config({ "droplets/staging.app.example.com.yaml": "name: staging.app.example.com\nweb:\n  exposure: staff\n" }));
+    expect(checkConfig(await config({ "droplets/staging.app.example.com.yaml": "name: staging.app.example.com\nssh: [admins]\n" }))).toEqual([]);
+    const ds = checkConfig(await config({ "droplets/staging.app.example.com.yaml": "name: staging.app.example.com\nssh: [admins]\nweb:\n  exposure: staff\n" }));
     expect(pick(ds)).toEqual([{ level: "error", code: "not-one-level", file: f("staging.app.example.com"), path: "name", droplet: "staging.app.example.com" }]);
     expect(ds[0]!.message).toContain("Use staging-app.example.com");
   });
@@ -57,6 +57,7 @@ describe("checkConfig", () => {
       await config({
         "droplets/app.example.com.yaml": [
           "name: app.example.com",
+          "ssh: [admins]",
           "web:",
           "  exposure: staff",
           "  hostnames: [x.y.example.net, app.example.org]",
@@ -80,6 +81,7 @@ describe("checkConfig", () => {
       await config({
         "droplets/app.example.com.yaml": [
           "name: app.example.com",
+          "ssh: [admins]",
           "web:",
           "  exposure: public",
           "  hostnames: [shop.example.net, tools.example.net]",
@@ -110,6 +112,7 @@ describe("checkConfig", () => {
       await config({
         "droplets/app.example.com.yaml": [
           "name: app.example.com",
+          "ssh: [admins]",
           "profile: ubuntu-99",
           "env: prod",
           "web:",
@@ -150,7 +153,7 @@ describe("checkConfig", () => {
 
   it("accepts /udp only with who: [staff], and says why", async () => {
     const tunnel = (who: string) =>
-      ["name: app.example.com", "allow:", "  tunnel:", "    - route: app-m.example.com", "      port: 9100/udp", `      who: ${who}`].join("\n");
+      ["name: app.example.com", "ssh: [admins]", "allow:", "  tunnel:", "    - route: app-m.example.com", "      port: 9100/udp", `      who: ${who}`].join("\n");
     expect(checkConfig(await config({ "droplets/app.example.com.yaml": tunnel("[staff]") }))).toEqual([]);
     for (const who of ["[service-token:etl]", "[staff, service-token:etl]"]) {
       const ds = checkConfig(await config({ "droplets/app.example.com.yaml": tunnel(who) }));
@@ -161,7 +164,7 @@ describe("checkConfig", () => {
   });
 
   it("needs a manager in every swarm cluster", async () => {
-    const ds = checkConfig(await config({ "droplets/worker.example.com.yaml": "name: worker.example.com\nenv: prod\nswarm:\n  cluster: jobs\n" }));
+    const ds = checkConfig(await config({ "droplets/worker.example.com.yaml": "name: worker.example.com\nssh: [admins]\nenv: prod\nswarm:\n  cluster: jobs\n" }));
     expect(pick(ds).map((d) => [d.code, d.file, d.path])).toEqual([
       ["swarm-no-manager", f("worker-2.example.com"), "swarm.role"],
       ["swarm-no-manager", f("worker.example.com"), "swarm.role"],
@@ -172,8 +175,8 @@ describe("checkConfig", () => {
   it("needs swarm members to agree on encrypted_overlay (reported on the minority)", async () => {
     const ds = checkConfig(
       await config({
-        "droplets/worker-2.example.com.yaml": "name: worker-2.example.com\nprofile: ubuntu-4\nenv: prod\nswarm:\n  cluster: jobs\n  encrypted_overlay: true\n",
-        "droplets/worker-3.example.com.yaml": "name: worker-3.example.com\nenv: prod\nswarm:\n  cluster: jobs\n",
+        "droplets/worker-2.example.com.yaml": "name: worker-2.example.com\nssh: [admins]\nprofile: ubuntu-4\nenv: prod\nswarm:\n  cluster: jobs\n  encrypted_overlay: true\n",
+        "droplets/worker-3.example.com.yaml": "name: worker-3.example.com\nssh: [admins]\nenv: prod\nswarm:\n  cluster: jobs\n",
       }),
     );
     expect(pick(ds).map((d) => [d.code, d.file, d.path])).toEqual([["swarm-overlay-mismatch", f("worker-2.example.com"), "swarm.encrypted_overlay"]]);
@@ -188,7 +191,7 @@ describe("checkDesired", () => {
 
   it("warns that a cross-region caller's PUBLIC IP will be allowed", async () => {
     const c = await config({
-      "droplets/db.example.com.yaml": "name: db.example.com\nenv: prod\nallow:\n  droplet:\n    - from: tools.example.net\n      ports: [5432/tcp]\n",
+      "droplets/db.example.com.yaml": "name: db.example.com\nssh: [admins]\nenv: prod\nallow:\n  droplet:\n    - from: tools.example.net\n      ports: [5432/tcp]\n",
     });
     const ds = checkDesired(buildDesired(c, EXISTING));
     expect(pick(ds)).toEqual([{ level: "warning", code: "cross-region-caller", file: f("db.example.com"), path: "allow.droplet[0].from", droplet: "db.example.com" }]);
@@ -198,7 +201,7 @@ describe("checkDesired", () => {
 
   it("says a new cross-region caller's public IP is known after create", async () => {
     const c = await config({
-      "droplets/db.example.com.yaml": "name: db.example.com\nenv: prod\nallow:\n  droplet:\n    - from: staging-shop.example.com\n      ports: [5432/tcp]\n",
+      "droplets/db.example.com.yaml": "name: db.example.com\nssh: [admins]\nenv: prod\nallow:\n  droplet:\n    - from: staging-shop.example.com\n      ports: [5432/tcp]\n",
     });
     const ds = checkDesired(buildDesired(c, EXISTING));
     expect(ds[0]!.message).toContain("PUBLIC IP (known after create)");
@@ -218,7 +221,7 @@ describe("checkDesired", () => {
   });
 
   it("requires swarm members to share one region", async () => {
-    const c = await config({ "droplets/worker-3.example.com.yaml": "name: worker-3.example.com\nswarm:\n  cluster: jobs\n" });
+    const c = await config({ "droplets/worker-3.example.com.yaml": "name: worker-3.example.com\nssh: [admins]\nswarm:\n  cluster: jobs\n" });
     const obs = [...EXISTING, observedDroplet("worker-3.example.com", { id: 6, region: "blr1" })];
     const ds = checkDesired(buildDesired(c, obs));
     expect(pick(ds)).toEqual([{ level: "error", code: "swarm-region", file: f("worker-3.example.com"), path: "swarm.cluster", droplet: "worker-3.example.com" }]);
@@ -227,7 +230,7 @@ describe("checkDesired", () => {
 
   it("ignores missing droplets and unknown callers (other checks report them)", async () => {
     const c = await config({
-      "droplets/db.example.com.yaml": "name: db.example.com\nallow:\n  droplet:\n    - from: shop.example.com\n      ports: [5432/tcp]\n",
+      "droplets/db.example.com.yaml": "name: db.example.com\nssh: [admins]\nallow:\n  droplet:\n    - from: shop.example.com\n      ports: [5432/tcp]\n",
     });
     // db is missing in DigitalOcean (desired reports droplet-not-found); nothing to add here.
     expect(checkDesired(buildDesired(c, EXISTING.filter((d) => d.name !== "db.example.com")))).toEqual([]);
@@ -274,7 +277,7 @@ describe("checkChange", () => {
 
   it("treats a renamed file as a removal: the old droplet must be renamed or deleted first", async () => {
     const base = await config();
-    const head = await config({ "droplets/tools.example.net.yaml": null, "droplets/tools2.example.net.yaml": "name: tools2.example.net\n" });
+    const head = await config({ "droplets/tools.example.net.yaml": null, "droplets/tools2.example.net.yaml": "name: tools2.example.net\nssh: [admins]\n" });
     expect(codes(checkChange(base, head, buildDesired(head, EXISTING)))).toEqual(["removed-droplet-exists"]);
   });
 
@@ -282,7 +285,7 @@ describe("checkChange", () => {
     const base = await config();
     const head = await config({
       "droplets/shop.example.com.yaml": (await exampleWith({}))["droplets/shop.example.com.yaml"]!.replace("env: prod", "profile: ubuntu-6\nenv: prod"),
-      "droplets/worker-2.example.com.yaml": "name: worker-2.example.com\nprofile: ubuntu-6\nenv: prod\nswarm:\n  cluster: jobs\n",
+      "droplets/worker-2.example.com.yaml": "name: worker-2.example.com\nssh: [admins]\nprofile: ubuntu-6\nenv: prod\nswarm:\n  cluster: jobs\n",
     });
     const ds = checkChange(base, head, buildDesired(head, EXISTING));
     expect(pick(ds)).toEqual([{ level: "info", code: "profile-changed", file: f("shop.example.com"), path: "profile", droplet: "shop.example.com" }]);

@@ -65,71 +65,71 @@ describe("loader: the example checkout", () => {
 
 describe("loader: droplet files", () => {
   it("requires name to equal the file name, with file, path and line", async () => {
-    const res = await loadWith({ [D("shop.example.com")]: "env: prod\nname: shop2.example.com\n" });
+    const res = await loadWith({ [D("shop.example.com")]: "env: prod\nname: shop2.example.com\nssh: [admins]\n" });
     expect(res.config).toBeUndefined();
     expect(only(res.diagnostics)).toMatchObject({ code: "file-name", file: D("shop.example.com"), path: "name", line: 2 });
   });
 
   it("names unknown keys with their path and line", async () => {
-    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nweb:\n  exposure: staff\n  colour: blue\n" });
+    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nweb:\n  exposure: staff\n  colour: blue\nssh: [admins]\n" });
     expect(only(res.diagnostics)).toMatchObject({ code: "schema", path: "web.colour", line: 4, message: 'unknown key "colour"' });
   });
 
   it("explains enum errors with the allowed values", async () => {
-    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nenv: production\n" });
+    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nenv: production\n" });
     expect(only(res.diagnostics)).toMatchObject({ path: "env", message: 'must be one of: "prod", "staging", "internal"' });
   });
 
   it("rejects a name that is not a lowercase domain", async () => {
-    const res = await loadWith({ [D("x.example.com")]: "name: X.example.com\n" });
+    const res = await loadWith({ [D("x.example.com")]: "name: X.example.com\nssh: [admins]\n" });
     const errs = res.diagnostics.filter((d) => d.level === "error");
     expect(errs.some((d) => d.path === "name" && d.message.includes("lowercase domain"))).toBe(true);
   });
 
   it("requires env with a profile and with deploy", async () => {
-    let res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nprofile: ubuntu-4\n" });
+    let res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nprofile: ubuntu-4\n" });
     expect(only(res.diagnostics).message).toContain("env is required when a profile is set");
-    res = await loadWith({ [D("x.example.com")]: "name: x.example.com\ndeploy: true\n" });
+    res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\ndeploy: true\n" });
     expect(only(res.diagnostics).message).toContain("env is required for a deploy target");
   });
 
   it("accepts a minimal adopted droplet", async () => {
-    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\n" });
+    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\n" });
     expect(res.diagnostics).toEqual([]);
     const x = res.config!.droplets.find((d) => d.file.name === "x.example.com")!.file;
-    expect(x).toEqual({ name: "x.example.com", deploy: false, frozen: false, allow: { droplet: [], tunnel: [], ip: [] } });
+    expect(x).toEqual({ name: "x.example.com", deploy: false, frozen: false, ssh: ["admins"], allow: { droplet: [], tunnel: [], ip: [] } });
   });
 
   it("rejects ports without protocol and reversed ranges", async () => {
-    let res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nallow:\n  droplet:\n    - from: shop.example.com\n      ports: [8443]\n" });
+    let res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nallow:\n  droplet:\n    - from: shop.example.com\n      ports: [8443]\nssh: [admins]\n" });
     expect(only(res.diagnostics)).toMatchObject({ path: "allow.droplet[0].ports[0]", line: 5 });
-    res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nallow:\n  ip:\n    - from: 192.0.2.1\n      ports: [9001-9000/tcp]\n" });
+    res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nallow:\n  ip:\n    - from: 192.0.2.1\n      ports: [9001-9000/tcp]\nssh: [admins]\n" });
     expect(only(res.diagnostics)).toMatchObject({ path: "allow.ip[0].ports[0]", message: expect.stringContaining("range end") });
   });
 
   it("rejects a tunnel route with a port range or a bad who", async () => {
     let res = await loadWith({
-      [D("x.example.com")]: "name: x.example.com\nallow:\n  tunnel:\n    - route: x-api.example.com\n      port: 80-81/tcp\n      who: [staff]\n",
+      [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nallow:\n  tunnel:\n    - route: x-api.example.com\n      port: 80-81/tcp\n      who: [staff]\n",
     });
     expect(only(res.diagnostics)).toMatchObject({ path: "allow.tunnel[0].port", message: expect.stringContaining("one port") });
     res = await loadWith({
-      [D("x.example.com")]: "name: x.example.com\nallow:\n  tunnel:\n    - route: x-api.example.com\n      port: 80/tcp\n      who: [everyone]\n",
+      [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nallow:\n  tunnel:\n    - route: x-api.example.com\n      port: 80/tcp\n      who: [everyone]\n",
     });
     expect(only(res.diagnostics)).toMatchObject({ path: "allow.tunnel[0].who[0]" });
   });
 
   it("rejects invalid addresses", async () => {
-    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nallow:\n  ip:\n    - from: 300.0.113.1\n      ports: [22/tcp]\n" });
+    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nallow:\n  ip:\n    - from: 300.0.113.1\n      ports: [22/tcp]\n" });
     expect(only(res.diagnostics)).toMatchObject({ path: "allow.ip[0].from", message: expect.stringContaining("IP address or CIDR") });
   });
 
   it("rejects a droplet listing itself as a caller", async () => {
-    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nallow:\n  droplet:\n    - from: x.example.com\n      ports: [22/tcp]\n" });
+    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nallow:\n  droplet:\n    - from: x.example.com\n      ports: [22/tcp]\n" });
     expect(only(res.diagnostics).path).toBe("allow.droplet[0].from");
   });
 
   describe("web", () => {
-    const web = (body: string) => ({ [D("x.example.com")]: `name: x.example.com\nweb:\n${body}` });
+    const web = (body: string) => ({ [D("x.example.com")]: `name: x.example.com\nssh: [admins]\nweb:\n${body}` });
 
     it("rejects protected_paths on a staff site", async () => {
       const res = await loadWith(web("  exposure: staff\n  protected_paths: [/admin]\n"));
@@ -174,18 +174,18 @@ describe("loader: droplet files", () => {
     it("rejects monitors for hostnames the droplet doesn't serve, and monitors without web", async () => {
       let res = await loadWith(web("  exposure: staff\nmonitors:\n  - hostname: other.example.com\n"));
       expect(only(res.diagnostics).path).toBe("monitors[0].hostname");
-      res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nmonitors:\n  - hostname: x.example.com\n" });
+      res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nmonitors:\n  - hostname: x.example.com\n" });
       expect(only(res.diagnostics).message).toContain("need a web section");
     });
   });
 
   describe("YAML", () => {
     it("rejects duplicate keys with the line", async () => {
-      const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nenv: prod\nenv: staging\n" });
+      const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nenv: prod\nenv: staging\nssh: [admins]\n" });
       expect(only(res.diagnostics)).toMatchObject({ code: "yaml", file: D("x.example.com"), line: 3 });
     });
     it("rejects several documents in one file", async () => {
-      const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\n---\nname: y.example.com\n" });
+      const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\n---\nname: y.example.com\n" });
       expect(only(res.diagnostics)).toMatchObject({ code: "yaml", message: expect.stringContaining("2 YAML documents") });
     });
     it("rejects an empty file and a non-object", async () => {
@@ -203,7 +203,7 @@ describe("loader: droplet files", () => {
       ["droplets/sub/x.example.com.yaml"],
       ["profiles/ubuntu-8.yml"],
     ])("rejects %s", async (path) => {
-      const res = await loadWith({ [path]: "name: x.example.com\n" });
+      const res = await loadWith({ [path]: "name: x.example.com\nssh: [admins]\n" });
       expect(only(res.diagnostics)).toMatchObject({ code: "layout", file: path });
     });
     it("ignores README.md and .gitkeep in data folders, and anything outside them", async () => {

@@ -1,16 +1,21 @@
 // Request bodies and the comparisons that decide create / update / noop. Ported unchanged in
 // behaviour from the infra-sync Worker (src/plan.ts there): every predicate here is what decides
 // whether the tool sees a difference against what the Worker built, so keep them exactly as they are.
+// Changed on purpose (decision 18): the infrastructure apps (one per SSH access set, ubuntu only),
+// the target tags (plus ssh-access=<set id>) and the people on each droplet's ssh- app.
 
+import { createHash } from "node:crypto";
 import {
   DEFAULT_WEB_ORIGIN,
   DNS_COMMENT_MARKER,
   HEALTH_APP_PREFIX,
   HEALTH_BYPASS_PATH,
-  INFRA_APP_NAME,
+  INFRA_APP_PREFIX,
+  LEGACY_INFRA_APP_NAME,
   NAME_PREFIX,
   RESERVED_PREFIXES,
-  SSH_USERNAMES,
+  SSH_ACCESS_TAG_KEY,
+  SSH_USERNAME,
   TARGET_TAG_KEY,
   TARGET_TAG_VALUE,
   VPC_PREFIX,
@@ -50,14 +55,18 @@ export const isOwnedRouteApp = (a: AccessApp) => a.type === "self_hosted" && (a.
 export const isOwnedApp = (a: AccessApp) =>
   (a.name ?? "").startsWith(NAME_PREFIX) &&
   a.type === "self_hosted" &&
-  a.name !== INFRA_APP_NAME &&
+  a.name !== LEGACY_INFRA_APP_NAME &&
   !isOwnedHealthApp(a) &&
   !isOwnedWebApp(a) &&
   !isOwnedRouteApp(a);
 export const isOwnedTarget = (t: InfraTarget) => t.tags?.[TARGET_TAG_KEY] === TARGET_TAG_VALUE;
 export const isOwnedDns = (r: DnsRecord) => (r.comment ?? "").startsWith(DNS_COMMENT_MARKER);
 export const isOwnedVpcDns = (r: DnsRecord) => isOwnedDns(r) && lc(r.name).startsWith(VPC_PREFIX);
-export const isInfraApp = (a: AccessApp) => a.name === INFRA_APP_NAME && a.type === "infrastructure";
+/**
+ * The tool's infrastructure apps: "infra-sync: SSH <set id>", and the Worker's single
+ * "infra-sync: SSH targets" (stale once every target is covered by a set app).
+ */
+export const isOwnedInfraApp = (a: AccessApp) => a.type === "infrastructure" && (a.name ?? "").startsWith(INFRA_APP_PREFIX);
 export const isReservedName = (h: string) => RESERVED_PREFIXES.some((p) => lc(h).startsWith(p));
 /** A site CNAME the tool created: marked, CNAME, and not one of the generated ssh-/vpc- names. */
 export const isOwnedWebDns = (r: DnsRecord) => isOwnedDns(r) && r.type === "CNAME" && !isReservedName(r.name);
@@ -134,14 +143,74 @@ export interface WebAppBody {
   policies: Array<AccessPolicy | PolicyLink>;
 }
 
-export function targetBody(name: string, ip: string): TargetBody {
-  return { hostname: name, ip: { ipv4: { ip_addr: ip } }, tags: { [TARGET_TAG_KEY]: TARGET_TAG_VALUE } };
+/**
+ * `setId`: the droplet's SSH access set (sshAccessSetId), as the tag the set's infrastructure app
+ * selects. Tags the tool doesn't manage (other keys on an existing target) are kept.
+ */
+export function targetBody(name: string, ip: string, setId: string, existingTags: Record<string, string> = {}): TargetBody {
+  const kept = Object.fromEntries(Object.entries(existingTags).filter(([k]) => k !== TARGET_TAG_KEY && k !== SSH_ACCESS_TAG_KEY));
+  return { hostname: name, ip: { ipv4: { ip_addr: ip } }, tags: { ...kept, [TARGET_TAG_KEY]: TARGET_TAG_VALUE, [SSH_ACCESS_TAG_KEY]: setId } };
+}
+
+/** Tags compared by key and value, order ignored. */
+export const sameTags = (a: Record<string, string> | undefined, b: Record<string, string>): boolean => {
+  const norm = (t: Record<string, string>) => JSON.stringify(Object.entries(t).sort(([x], [y]) => x.localeCompare(y)));
+  return norm(a ?? {}) === norm(b);
+};
+
+// ---------- SSH access sets (decision 18) ----------
+
+/**
+ * A stable id for a set of people who may SSH (lowercase, deduplicated, sorted emails): the first
+ * 12 hex digits of its SHA-256. Droplets with the same people share one infrastructure app.
+ */
+export function sshAccessSetId(emails: readonly string[]): string {
+  const norm = [...new Set(emails.map((e) => e.trim().toLowerCase()))].sort();
+  return createHash("sha256").update(norm.join("\n")).digest("hex").slice(0, 12);
+}
+
+export const infraAppName = (setId: string) => INFRA_APP_PREFIX + setId;
+
+/** Who an app lets in and as which users: the emails of its Allow policies, their SSH usernames. */
+export interface SshAccessView {
+  emails: string[];
+  usernames: string[];
+}
+
+export function sshAccessOf(apps: readonly AccessApp[]): SshAccessView {
+  const emails = new Set<string>();
+  const users = new Set<string>();
+  for (const a of apps) {
+    for (const p of a.policies ?? []) {
+      if (p.decision !== "allow") continue;
+      for (const r of p.include ?? []) {
+        const e = (r as { email?: { email?: string } }).email?.email;
+        if (e) emails.add(lc(e));
+      }
+      for (const u of p.connection_rules?.ssh?.usernames ?? []) users.add(u);
+    }
+  }
+  return { emails: [...emails].sort(), usernames: [...users].sort() };
+}
+
+/** True when one of the app's target criteria selects a target with these tags (every tag key must match). */
+export function appSelects(a: AccessApp, tags: Record<string, string> | undefined): boolean {
+  return (a.target_criteria ?? []).some((c) => {
+    const want = (c as { include?: { tags?: Record<string, string[]> } }).include?.tags ?? {};
+    const keys = Object.keys(want);
+    return keys.length > 0 && keys.every((k) => tags?.[k] !== undefined && (want[k] ?? []).includes(tags[k]!));
+  });
 }
 
 const emailRules = (emails: string[]): AccessRule[] => emails.map((email) => ({ email: { email } }));
 const tokenRules = (ids: string[]): AccessRule[] => ids.map((token_id) => ({ service_token: { token_id } }));
 
-export function appBody(sshHostname: string, adminEmails: string[], tokenIds: string[], env?: EnvName): AppBody {
+/**
+ * The droplet's ssh- route app: CI deploy tokens (deploy targets), then the droplet's SSH access
+ * list. The policy keeps the Worker's name "ssh-admins", so a droplet whose list equals the Worker's
+ * admins shows no change.
+ */
+export function appBody(sshHostname: string, sshEmails: string[], tokenIds: string[], env?: EnvName): AppBody {
   const policies: AccessPolicy[] = [];
   if (tokenIds.length) {
     policies.push({
@@ -150,7 +219,7 @@ export function appBody(sshHostname: string, adminEmails: string[], tokenIds: st
       include: tokenRules(tokenIds),
     });
   }
-  policies.push({ name: `${NAME_PREFIX} ssh-admins`, decision: "allow", include: emailRules(adminEmails) });
+  policies.push({ name: `${NAME_PREFIX} ssh-admins`, decision: "allow", include: emailRules(sshEmails) });
   policies.forEach((p, i) => (p.precedence = i + 1));
   return {
     name: `${NAME_PREFIX} ${sshHostname}`,
@@ -162,17 +231,18 @@ export function appBody(sshHostname: string, adminEmails: string[], tokenIds: st
   };
 }
 
-export function infraAppBody(adminEmails: string[]): InfraAppBody {
+/** One SSH access set: port 22 of every target tagged ssh-access=<set id>, for these people, as ubuntu only. */
+export function infraAppBody(setId: string, emails: string[]): InfraAppBody {
   return {
-    name: INFRA_APP_NAME,
+    name: infraAppName(setId),
     type: "infrastructure",
-    target_criteria: [{ port: 22, protocol: "SSH", include: { tags: { [TARGET_TAG_KEY]: [TARGET_TAG_VALUE] } } }],
+    target_criteria: [{ port: 22, protocol: "SSH", include: { tags: { [SSH_ACCESS_TAG_KEY]: [setId] } } }],
     policies: [
       {
-        name: `${NAME_PREFIX} ssh-admins`,
+        name: `${NAME_PREFIX} ssh-access`,
         decision: "allow",
-        include: emailRules(adminEmails),
-        connection_rules: { ssh: { usernames: [...SSH_USERNAMES].sort() } },
+        include: emailRules(emails),
+        connection_rules: { ssh: { usernames: [SSH_USERNAME] } },
         precedence: 1,
       },
     ],

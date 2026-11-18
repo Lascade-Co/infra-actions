@@ -198,14 +198,61 @@ function warningsSections(doc: Doc, r: RunReport) {
   doc.section(`\n<details><summary>Notes (${infos.length})</summary>\n`, infos.map(diagLine), "\n</details>");
 }
 
-/** Ops grouped by droplet, the shared ones last. */
+// ---------- SSH access (decision 18) ----------
+
+const ROOT = "root";
+
+/**
+ * One droplet's "SSH access" line: who gains and who loses SSH to it, from its infra-target op
+ * (`sshAccess`, set by the cloudflare module when the change alters who may SSH). Undefined when
+ * nothing changes for people.
+ */
+export function sshAccessLine(ops: readonly PlanOp[]): string | undefined {
+  const a = ops.find((op) => op.kind === "infra-target" && op.sshAccess)?.sshAccess;
+  if (!a) return undefined;
+  const gains = a.after.emails.filter((e) => !a.before.emails.includes(e));
+  const loses = a.before.emails.filter((e) => !a.after.emails.includes(e));
+  const parts = [gains.length ? `gains ${gains.join(", ")}` : "", loses.length ? `loses ${loses.join(", ")}` : ""].filter(Boolean);
+  if (!parts.length) parts.push("the same people");
+  const as = a.after.emails.length ? `, as ${a.after.usernames.map(code).join(", ")}` : ": nobody can SSH in through Cloudflare";
+  return `- **SSH access:** ${mdText(parts.join("; "))}${as}`;
+}
+
+/** Droplets whose root SSH login this run removes (from their infra-target ops). */
+export function rootRemovedOn(ops: readonly PlanOp[]): string[] {
+  const names = ops.flatMap((op) =>
+    op.kind === "infra-target" && op.droplet && op.sshAccess?.before.usernames.includes(ROOT) && !op.sshAccess.after.usernames.includes(ROOT) ? [op.droplet] : [],
+  );
+  return [...new Set(names)].sort();
+}
+
+/** An infrastructure app this run deletes that let people in as root (the Worker's single app). */
+const deletesRootApp = (ops: readonly PlanOp[]): boolean =>
+  ops.some((op) => {
+    if (op.kind !== "infra-app" || op.action !== "delete") return false;
+    const ps = (op.before as { policies?: Array<{ connection_rules?: { ssh?: { usernames?: string[] } } }> } | null)?.policies ?? [];
+    return ps.some((p) => p.connection_rules?.ssh?.usernames?.includes(ROOT));
+  });
+
+/** Root removal, called out once (not on every droplet). */
+function rootRemovedNote(ops: readonly PlanOp[]): string | undefined {
+  const on = rootRemovedOn(ops);
+  if (!on.length && !deletesRootApp(ops)) return undefined;
+  const where = on.length ? ` on ${on.length} droplet(s)` : "";
+  return `> **Root SSH login is removed${where}.** SSH through Cloudflare is only as ${code("ubuntu")} from now on; root only through the DigitalOcean web console.`;
+}
+
+/** Ops grouped by droplet, the shared ones last. Each droplet's SSH access change leads its group. */
 function opsByDroplet(doc: Doc, title: string, ops: PlanOp[], opts: { action?: boolean; provider?: boolean; intro?: string } = {}) {
   if (!ops.length) return;
   doc.always("", `### ${title} (${ops.length})`);
   if (opts.intro) doc.always("", opts.intro);
+  const root = rootRemovedNote(ops);
+  if (root) doc.always("", root);
   for (const [droplet, group] of byDroplet(ops)) {
     const heading = droplet ? `#### ${code(droplet)} (${group.length})` : `#### Shared, not tied to one droplet (${group.length})`;
-    doc.section(`\n${heading}\n`, group.map((op) => opItem(op, opts)));
+    const access = droplet ? sshAccessLine(group) : undefined;
+    doc.section(`\n${heading}\n`, [...(access ? [access] : []), ...group.map((op) => opItem(op, opts))]);
   }
 }
 

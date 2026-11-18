@@ -82,7 +82,7 @@ function messageOf(e: ErrorObject): string {
     case "type":
       return `must be ${String(p.type)}`;
     case "minItems":
-      return `must have at least ${String(p.limit)} item(s)`;
+      return h ?? `must have at least ${String(p.limit)} item(s)`;
     case "uniqueItems":
       return `has duplicate items (${String(p.j)} and ${String(p.i)})`;
     case "minProperties":

@@ -236,6 +236,7 @@ describe("oneuptime plan", () => {
     const d = await desired({
       "droplets/shop.example.com.yaml": [
         "name: shop.example.com",
+        "ssh: [admins]",
         "env: prod",
         "deploy: true",
         "web:",
@@ -248,6 +249,7 @@ describe("oneuptime plan", () => {
       ].join("\n"),
       "droplets/tools.example.net.yaml": [
         "name: tools.example.net",
+        "ssh: [admins]",
         "env: internal",
         "web:",
         "  exposure: staff",

@@ -278,7 +278,8 @@ export function loadInfraFiles(files: InfraFiles): LoadResult {
 
 // ---------- account ----------
 
-type RawAccount = Omit<AccountConfig, "cloudflare" | "github" | "ssh_config"> & {
+type RawAccount = Omit<AccountConfig, "cloudflare" | "github" | "ssh_config" | "ssh_groups"> & {
+  ssh_groups?: Record<string, string[]>;
   cloudflare: Omit<AccountConfig["cloudflare"], "guards"> & { guards?: Partial<AccountConfig["cloudflare"]["guards"]> };
   github: { infra_repo: string; ssh_config_branch?: string; ssh_config_file?: string };
   ssh_config: { title: string; user?: string };
@@ -304,7 +305,6 @@ function toAccount(raw: RawAccount, ctx: FileCtx): AccountConfig {
     cloudflare: {
       ...cf,
       zones: [...cf.zones].sort(),
-      ssh_admin_emails: [...new Set(cf.ssh_admin_emails.map((e) => e.toLowerCase()))].sort(),
       guards: { max_deletes: cf.guards?.max_deletes ?? 20, max_delete_fraction: cf.guards?.max_delete_fraction ?? 0.3 },
     },
     github: {
@@ -313,6 +313,13 @@ function toAccount(raw: RawAccount, ctx: FileCtx): AccountConfig {
       ssh_config_file: raw.github.ssh_config_file ?? "ssh_config",
     },
     ssh_config: { title: raw.ssh_config.title, user: raw.ssh_config.user ?? "ubuntu" },
+    ssh_email_domain: raw.ssh_email_domain.toLowerCase(),
+    // The domain of each email is checked in src/checks (with the droplet files' emails).
+    ssh_groups: Object.fromEntries(
+      Object.entries(raw.ssh_groups ?? {})
+        .sort(([a], [b]) => a.localeCompare(b))
+        .map(([name, emails]) => [name, [...new Set(emails.map((e) => e.toLowerCase()))].sort()]),
+    ),
   };
 }
 
@@ -325,6 +332,7 @@ interface RawDroplet {
   env?: EnvName;
   deploy?: boolean;
   frozen?: boolean;
+  ssh: string[];
   web?: {
     exposure: WebSpec["exposure"];
     origin?: string;
@@ -463,6 +471,7 @@ function toDroplet(raw: RawDroplet, ctx: FileCtx): DropletFile {
     ...(raw.env !== undefined ? { env: raw.env } : {}),
     deploy: raw.deploy ?? false,
     frozen: raw.frozen ?? false,
+    ssh: [...raw.ssh],
     ...(web ? { web } : {}),
     ...(monitors ? { monitors } : {}),
     allow: toAllow(raw.allow, raw.name, ctx),

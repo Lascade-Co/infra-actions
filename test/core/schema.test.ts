@@ -21,7 +21,7 @@ describe("schemas", () => {
   it("droplet file keys match the TypeScript model", () => {
     const s = readSchema("droplet") as { properties: Record<string, unknown>; definitions: Record<string, { properties?: Record<string, unknown> }> };
     expect(Object.keys(s.properties).sort()).toEqual(
-      ["allow", "deploy", "description", "env", "frozen", "monitors", "name", "profile", "swarm", "web"].sort(),
+      ["allow", "deploy", "description", "env", "frozen", "monitors", "name", "profile", "ssh", "swarm", "web"].sort(),
     );
     expect(Object.keys(s.definitions.web!.properties!).sort()).toEqual(
       ["exceptions", "exposure", "health_accept_app_404", "health_path", "hostnames", "origin", "protected_paths"].sort(),
@@ -33,14 +33,14 @@ describe("schemas", () => {
 
   it("account keys match the TypeScript model", () => {
     const s = readSchema("account") as { properties: Record<string, { properties?: Record<string, unknown> }> };
-    expect(Object.keys(s.properties).sort()).toEqual(["cloudflare", "digitalocean", "github", "oneuptime", "ssh_config", "telegram"]);
+    expect(Object.keys(s.properties).sort()).toEqual(["cloudflare", "digitalocean", "github", "oneuptime", "ssh_config", "ssh_email_domain", "ssh_groups", "telegram"]);
     expect(Object.keys(s.properties.cloudflare!.properties!).sort()).toEqual(
-      ["account_id", "ci_deploy_tokens", "guards", "service_tokens", "ssh_admin_emails", "staff_policy_id", "team_domain", "tunnels", "zones"].sort(),
+      ["account_id", "ci_deploy_tokens", "guards", "service_tokens", "staff_policy_id", "team_domain", "tunnels", "zones"].sort(),
     );
   });
 
   it("rejects unknown keys at every level", () => {
-    expect(validate("droplet", { name: "x.example.com", tags: ["web-staff"] })).toEqual([
+    expect(validate("droplet", { name: "x.example.com", ssh: ["admins"], tags: ["web-staff"] })).toEqual([
       { segments: ["tags"], path: "tags", message: 'unknown key "tags"' },
     ]);
     expect(validate("profile", { name: "p", size: "s", image: "i", user_data: "u", region: "nyc1" })).toEqual([
@@ -51,6 +51,7 @@ describe("schemas", () => {
   it("reports every problem at once, with dotted paths", () => {
     const issues = validate("droplet", {
       name: "x.example.com",
+      ssh: ["admins"],
       env: "dev",
       web: { exposure: "staff", exceptions: [{ path: "/a" }] },
       allow: { tunnel: [{ route: "r.example.com", port: "22/sctp", who: [] }] },
@@ -61,7 +62,7 @@ describe("schemas", () => {
   });
 
   it("accepts the documented forms of exception allow", () => {
-    const d = (allow: unknown) => ({ name: "x.example.com", web: { exposure: "public", exceptions: [{ path: "/a", allow }] } });
+    const d = (allow: unknown) => ({ name: "x.example.com", ssh: ["admins"], web: { exposure: "public", exceptions: [{ path: "/a", allow }] } });
     expect(validate("droplet", d("everyone"))).toEqual([]);
     expect(validate("droplet", d({ ips: ["192.0.2.1"] }))).toEqual([]);
     expect(validate("droplet", d({ service_tokens: ["uptime"] }))).toEqual([]);

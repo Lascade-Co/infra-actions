@@ -67,7 +67,7 @@ describe("firewallRules", () => {
 
   it("uses the caller's public IP across regions and flags it", async () => {
     const { rules } = firewallRules(
-      await desired({ "droplets/db.example.com.yaml": "name: db.example.com\nallow:\n  droplet:\n    - from: tools.example.net\n      ports: [5432/tcp]\n" }),
+      await desired({ "droplets/db.example.com.yaml": "name: db.example.com\nssh: [admins]\nallow:\n  droplet:\n    - from: tools.example.net\n      ports: [5432/tcp]\n" }),
     );
     expect(rules.filter((r) => r.droplet === "db.example.com")).toEqual([
       {
@@ -84,8 +84,8 @@ describe("firewallRules", () => {
   it("warns once per cluster that ESP can't be expressed, and makes no rule for it", async () => {
     const { rules, diagnostics } = firewallRules(
       await desired({
-        "droplets/worker.example.com.yaml": "name: worker.example.com\nenv: prod\nswarm:\n  cluster: jobs\n  role: manager\n  encrypted_overlay: true\n",
-        "droplets/worker-2.example.com.yaml": "name: worker-2.example.com\nprofile: ubuntu-4\nenv: prod\nswarm:\n  cluster: jobs\n  encrypted_overlay: true\n",
+        "droplets/worker.example.com.yaml": "name: worker.example.com\nssh: [admins]\nenv: prod\nswarm:\n  cluster: jobs\n  role: manager\n  encrypted_overlay: true\n",
+        "droplets/worker-2.example.com.yaml": "name: worker-2.example.com\nssh: [admins]\nprofile: ubuntu-4\nenv: prod\nswarm:\n  cluster: jobs\n  encrypted_overlay: true\n",
       }),
     );
     expect(diagnostics.map((d) => [d.level, d.code, d.file, d.path])).toEqual([["warning", "swarm-esp", "droplets/worker-2.example.com.yaml", "swarm.encrypted_overlay"]]);
@@ -96,9 +96,9 @@ describe("firewallRules", () => {
   it("keeps a rule implied by both swarm and allow.droplet once", async () => {
     const { rules } = firewallRules(
       await desired({
-        "droplets/worker.example.com.yaml": "name: worker.example.com\nenv: prod\nswarm:\n  cluster: jobs\n  role: manager\n",
+        "droplets/worker.example.com.yaml": "name: worker.example.com\nssh: [admins]\nenv: prod\nswarm:\n  cluster: jobs\n  role: manager\n",
         "droplets/worker-2.example.com.yaml":
-          "name: worker-2.example.com\nprofile: ubuntu-4\nenv: prod\nswarm:\n  cluster: jobs\nallow:\n  droplet:\n    - from: worker.example.com\n      ports: [7946/tcp]\n      note: gossip\n",
+          "name: worker-2.example.com\nssh: [admins]\nprofile: ubuntu-4\nenv: prod\nswarm:\n  cluster: jobs\nallow:\n  droplet:\n    - from: worker.example.com\n      ports: [7946/tcp]\n      note: gossip\n",
       }),
     );
     const gossip = rules.filter((r) => r.droplet === "worker-2.example.com" && r.protocol === "tcp" && r.ports === "7946");
@@ -108,7 +108,7 @@ describe("firewallRules", () => {
 
   it("never throws: skips unknown callers and droplets that are missing", async () => {
     const d = await desired(
-      { "droplets/db.example.com.yaml": "name: db.example.com\nallow:\n  droplet:\n    - from: ghost.example.com\n      ports: [5432/tcp]\n    - from: shop.example.com\n      ports: [5432/tcp]\n" },
+      { "droplets/db.example.com.yaml": "name: db.example.com\nssh: [admins]\nallow:\n  droplet:\n    - from: ghost.example.com\n      ports: [5432/tcp]\n    - from: shop.example.com\n      ports: [5432/tcp]\n" },
       EXISTING.filter((x) => x.name !== "shop.example.com"),
     );
     // shop is missing (no droplet, no profile); ghost has no file. Neither yields a rule; shop's own rules are gone too.
@@ -140,7 +140,7 @@ describe("planFirewall (report-only)", () => {
 
   it("flags cross-region callers in the reason", async () => {
     const plan = planFirewall(
-      await desired({ "droplets/db.example.com.yaml": "name: db.example.com\nallow:\n  droplet:\n    - from: tools.example.net\n      ports: [5432/tcp]\n" }),
+      await desired({ "droplets/db.example.com.yaml": "name: db.example.com\nssh: [admins]\nallow:\n  droplet:\n    - from: tools.example.net\n      ports: [5432/tcp]\n" }),
       { firewalls: [] },
     );
     const op = plan.ops.find((o) => o.droplet === "db.example.com")!;
@@ -211,7 +211,7 @@ describe("planFirewall (report-only)", () => {
   });
 
   it("counts a rule already granted by a kept rule as unchanged", async () => {
-    const plan = planFirewall(await desired({ "droplets/db.example.com.yaml": "name: db.example.com\nallow:\n  ip:\n    - from: 0.0.0.0/0\n      ports: [5432/tcp]\n  droplet:\n    - from: shop.example.com\n      ports: [5432/tcp]\n" }), {
+    const plan = planFirewall(await desired({ "droplets/db.example.com.yaml": "name: db.example.com\nssh: [admins]\nallow:\n  ip:\n    - from: 0.0.0.0/0\n      ports: [5432/tcp]\n  droplet:\n    - from: shop.example.com\n      ports: [5432/tcp]\n" }), {
       firewalls: [fw({ name: "fw-db", droplet_ids: [1], inbound_rules: [{ protocol: "tcp", ports: "5432", sources: { addresses: ["0.0.0.0/0"] } }] })],
     });
     expect(plan.ops.filter((o) => o.droplet === "db.example.com")).toEqual([]);

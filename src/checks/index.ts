@@ -6,7 +6,7 @@
 
 import type { DesiredDroplet, DesiredState } from "../core/desired.js";
 import type { Diagnostic, Level } from "../core/diagnostics.js";
-import { DROPLETS_DIR } from "../core/loader.js";
+import { ACCOUNT_FILE, DROPLETS_DIR } from "../core/loader.js";
 import type { DropletEntry, DropletFile, InfraConfig } from "../core/model.js";
 import { flattenName, isOneLevel } from "../core/naming.js";
 import { formatPort, formatWho } from "../core/values.js";
@@ -37,7 +37,10 @@ const listNames = (names: readonly string[]): string => names.join(", ");
  *    names (who, exception allow.service_tokens) exist in account.cloudflare.service_tokens;
  *  - deploy needs a ci_deploy_tokens entry for its env (warning, as the Worker);
  *  - allow.tunnel: /udp only with who: [staff] (reason in the message);
- *  - swarm: at least one manager per cluster; members agree on encrypted_overlay.
+ *  - swarm: at least one manager per cluster; members agree on encrypted_overlay;
+ *  - SSH access (decision 18): every ssh entry is a group in account.yaml ssh_groups or an email
+ *    in ssh_email_domain; every email in ssh_groups is in that domain; no empty list or group
+ *    (the schema already rejects those; checked again for configs built in code).
  */
 export function checkConfig(config: InfraConfig): Diagnostic[] {
   const out: Diagnostic[] = [];
@@ -200,6 +203,9 @@ export function checkConfig(config: InfraConfig): Diagnostic[] {
     });
   }
 
+  // ---------- SSH access ----------
+  out.push(...checkSsh(config));
+
   // ---------- swarm ----------
   for (const [cluster, members] of swarmClusters(config.droplets.map((e) => ({ entry: e, spec: e.file })))) {
     const entries = members.map((m) => m.entry);
@@ -225,6 +231,48 @@ export function checkConfig(config: InfraConfig): Diagnostic[] {
     }
   }
 
+  return out;
+}
+
+/** The part after the last @, lowercase. */
+const domainOf = (email: string): string => email.slice(email.lastIndexOf("@") + 1).toLowerCase();
+
+function checkSsh(config: InfraConfig): Diagnostic[] {
+  const out: Diagnostic[] = [];
+  const { account } = config;
+  const domain = account.ssh_email_domain.toLowerCase();
+  const groups = account.ssh_groups;
+  const known = Object.keys(groups).sort();
+  const groupHint = known.length ? `known: ${listNames(known)}` : "account.yaml has no ssh_groups";
+  const outside = (email: string) =>
+    `${email} is not an @${domain} address: only ${domain} addresses (account.yaml ssh_email_domain) may SSH into droplets`;
+
+  for (const name of known) {
+    const emails = groups[name]!;
+    if (!emails.length) {
+      out.push({ level: "error", code: "ssh-group-empty", file: ACCOUNT_FILE, path: `ssh_groups.${name}`, message: `SSH group "${name}" lists no one; list at least one email or remove the group` });
+    }
+    emails.forEach((e, i) => {
+      if (domainOf(e) !== domain) {
+        out.push({ level: "error", code: "ssh-email-domain", file: ACCOUNT_FILE, path: `ssh_groups.${name}[${i}]`, message: outside(e) });
+      }
+    });
+  }
+
+  for (const e of config.droplets) {
+    const ssh = e.file.ssh ?? [];
+    if (!ssh.length) {
+      out.push(diag("error", "ssh-missing", e, "ssh", "ssh lists no one: every droplet needs at least one group or email allowed to SSH in as ubuntu"));
+    }
+    ssh.forEach((entry, i) => {
+      const path = `ssh[${i}]`;
+      if (entry.includes("@")) {
+        if (domainOf(entry) !== domain) out.push(diag("error", "ssh-email-domain", e, path, outside(entry)));
+      } else if (!Object.hasOwn(groups, entry)) {
+        out.push(diag("error", "unknown-ssh-group", e, path, `SSH group "${entry}" is not in account.yaml ssh_groups (${groupHint})`));
+      }
+    });
+  }
   return out;
 }
 

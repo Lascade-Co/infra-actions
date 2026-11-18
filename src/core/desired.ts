@@ -88,6 +88,11 @@ export interface DesiredDroplet {
   frozen: boolean;
   /** The managed DigitalOcean tags this droplet should carry (subset of MANAGED_TAGS), sorted. */
   tags: string[];
+  /**
+   * The SSH access list resolved: groups expanded, emails lowercased, deduplicated, sorted. Who may
+   * SSH into the droplet, always as ubuntu. An unknown group adds nothing (src/checks reports it).
+   */
+  sshEmails: string[];
   web?: DesiredWeb;
   monitors: DesiredMonitor[];
 }
@@ -108,6 +113,16 @@ export function desiredTags(spec: DropletFile): string[] {
   if (spec.deploy) tags.push(CI_DEPLOY_TAG);
   if (spec.web) tags.push(spec.web.exposure === "staff" ? WEB_STAFF_TAG : WEB_PUBLIC_TAG);
   return tags.sort();
+}
+
+/** A droplet's ssh list with its groups expanded: lowercase emails, deduplicated, sorted. */
+export function resolveSshAccess(account: AccountConfig, ssh: readonly string[]): string[] {
+  const out = new Set<string>();
+  for (const entry of ssh) {
+    if (entry.includes("@")) out.add(entry.toLowerCase());
+    else for (const e of account.ssh_groups[entry] ?? []) out.add(e.toLowerCase());
+  }
+  return [...out].sort();
 }
 
 export function desiredWeb(spec: DropletFile): DesiredWeb | undefined {
@@ -193,6 +208,7 @@ export function buildDesired(config: InfraConfig, observed: readonly ObservedDro
       deploy: spec.deploy,
       frozen: spec.frozen,
       tags: desiredTags(spec),
+      sshEmails: resolveSshAccess(account, spec.ssh),
       ...(web ? { web } : {}),
       monitors: desiredMonitors(spec, web),
     };

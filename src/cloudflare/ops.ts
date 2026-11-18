@@ -14,12 +14,15 @@
 import type { DesiredState } from "../core/desired.js";
 import type { Json, PlanOp } from "../core/plan.js";
 import { flattenName } from "../core/naming.js";
+import { LEGACY_INFRA_APP_NAME } from "../core/constants.js";
 import { appDestinations, appDomains, lc, webAppKind } from "./bodies.js";
 import { mergeIngress, rulesFor, type UpsertTarget } from "./ingress.js";
 import type { Plan, Snapshot } from "./plan.js";
 import type { AccessApp, AccessPolicy, DnsRecord, IngressRule, InfraTarget, ReadError, TunnelConfiguration } from "./types.js";
 
 export const PHASE = {
+  /** SSH access set apps: before the targets, so a retagged target always finds its set's app. */
+  infraApp: 0,
   target: 1,
   sshApp: 2,
   siteApp: 3,
@@ -38,11 +41,12 @@ export const PHASE = {
   vpcDelete: 16,
   health: 17,
   healthDelete: 18,
-  infraApp: 19,
+  /** Unwanted infrastructure apps (the Worker's single app, unused sets): last, after every app and target op. */
+  infraAppDelete: 19,
 } as const;
 
 /** Role of an op in its hostname's chain (see deps below). */
-type Role = "T" | "A" | "G" | "E" | "I" | "D" | "M" | "XD" | "XI" | "XA" | "XW" | "XT" | "free";
+type Role = "T" | "A" | "G" | "E" | "I" | "D" | "M" | "XD" | "XI" | "XA" | "XW" | "XT" | "IA" | "XIA" | "free";
 
 interface Draft {
   op: PlanOp;
@@ -58,6 +62,8 @@ interface Draft {
   exception?: boolean;
   /** XW: the site has 404 rules (its old apps go only once the route is live). */
   notFound?: boolean;
+  /** T, IA: the SSH access set (a retag waits for its set's app). */
+  setId?: string;
 }
 
 const isErr = (x: unknown): x is ReadError => !!x && typeof x === "object" && "error" in x;
@@ -71,7 +77,7 @@ function appView(a: AccessApp): Json {
     destinations: appDestinations(a),
     ...(a.allow_authenticate_via_warp !== undefined ? { allow_authenticate_via_warp: a.allow_authenticate_via_warp } : {}),
     ...(a.target_criteria ? { target_criteria: a.target_criteria } : {}),
-    policies: (a.policies ?? []).map(pol),
+    policies: (a.policies ?? []).map((p) => ({ ...pol(p), ...(p.connection_rules ? { connection_rules: p.connection_rules } : {}) })),
   });
 }
 const dnsView = (r: DnsRecord): Json => j({ type: r.type, name: r.name, content: r.content, proxied: r.proxied ?? null, ttl: r.ttl ?? null, comment: r.comment ?? null });
@@ -139,15 +145,24 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
           phase: PHASE.target,
           role: "T",
           chain: `ssh ${h.sshHostname}`,
+          setId: h.setId,
           op: {
             kind: "infra-target",
             key: h.name,
             action: opAction(t.op),
             before: t.existing ? targetView(t.existing) : null,
             after: j(t.body),
-            reason: t.op === "create" ? "SSH target for a managed droplet" : t.existing?.hostname !== h.name ? "the droplet was renamed (same private IP)" : "the droplet's private IP changed",
+            reason:
+              t.op === "create"
+                ? "SSH target for a managed droplet"
+                : t.existing?.hostname !== h.name
+                  ? "the droplet was renamed (same private IP)"
+                  : t.existing?.ip?.ipv4?.ip_addr !== h.privateIp
+                    ? "the droplet's private IP changed"
+                    : "the droplet's SSH access set changed (the ssh-access tag selects its Access app)",
             droplet: h.name,
             ...(t.existingId ? { ids: { id: t.existingId } } : {}),
+            ...(h.access ? { sshAccess: { before: h.access.before, after: h.access.after } } : {}),
           },
         },
         h.pending,
@@ -167,7 +182,7 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
               action: opAction(h.app.op),
               before: h.app.existing ? appView(h.app.existing) : null,
               after: j(h.app.body),
-              reason: h.app.op === "create" ? "Access app for the droplet's SSH route" : "the SSH route's Access policies changed (admins or CI deploy tokens)",
+              reason: h.app.op === "create" ? "Access app for the droplet's SSH route" : "the SSH route's Access policies changed (the droplet's ssh list or CI deploy tokens)",
               droplet: h.name,
               ids: {
                 ...(h.app.existingId ? { id: h.app.existingId } : {}),
@@ -624,22 +639,51 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
       },
     });
   }
-  const ia = plan.infraApp;
-  if (ia.op === "noop") unchanged++;
-  else
+  // ---------- infrastructure apps: one per SSH access set (decision 18) ----------
+
+  for (const ia of plan.infraApps) {
+    if (ia.op === "noop") {
+      unchanged++;
+      continue;
+    }
+    const who = `${ia.emails.join(", ")} as ubuntu, on ${ia.droplets.join(", ")}`;
     add({
       phase: PHASE.infraApp,
-      role: "free",
+      role: "IA",
+      setId: ia.setId,
       op: {
         kind: "infra-app",
         key: ia.body.name,
         action: opAction(ia.op),
         before: ia.existing ? appView(ia.existing) : null,
         after: j(ia.body),
-        reason: ia.op === "create" ? "the one infrastructure app covering every SSH target" : "the SSH admins changed",
+        reason: ia.op === "create" ? `SSH access set: ${who}` : `the SSH access set's app was changed outside the tool; put back: ${who}`,
         ...(ia.existingId ? { ids: { id: ia.existingId } } : {}),
       },
     });
+  }
+  for (const x of plan.staleInfraApps) {
+    const a = x.app;
+    const legacy = a.name === LEGACY_INFRA_APP_NAME;
+    const why = legacy
+      ? "the Worker's single SSH app (every droplet, as ubuntu and root), replaced by one app per SSH access set"
+      : "no droplet uses this SSH access set any more (or a duplicate)";
+    add({
+      phase: PHASE.infraAppDelete,
+      role: x.keptFor.length ? "free" : "XIA",
+      op: {
+        kind: "infra-app",
+        key: a.name ?? a.id,
+        action: x.keptFor.length ? "report" : del,
+        before: appView(a),
+        after: null,
+        reason: x.keptFor.length
+          ? `${why}; kept for now: SSH to ${x.keptFor.join(", ")} still goes only through it`
+          : delReason(`${why}; removed after the new apps and target tags are in place`),
+        ids: { id: a.id },
+      },
+    });
+  }
 
   return { ops: finish(drafts), unchanged };
 }
@@ -679,6 +723,14 @@ function finish(drafts: Draft[]): PlanOp[] {
   for (const d of drafts) {
     let deps: Draft[] = [];
     switch (d.role) {
+      case "T":
+        // A target moves to its set's app only once that app is in place.
+        deps = drafts.filter((x) => x.role === "IA" && x.setId === d.setId);
+        break;
+      case "XIA":
+        // Never leave a droplet without an app: every app and target op of the run first.
+        deps = drafts.filter((x) => x.role === "IA" || (x.role === "T" && x.op.action !== "delete"));
+        break;
       case "A":
         deps = inChain(d.chain, ["T"]);
         break;

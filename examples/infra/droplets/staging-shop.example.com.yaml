@@ -5,6 +5,7 @@ description: Storefront staging (example)
 profile: ubuntu-6
 env: staging
 deploy: true
+ssh: [admins, shop-team]
 web:
   exposure: staff
   origin: http://{ip}:80

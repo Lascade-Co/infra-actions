@@ -36,8 +36,6 @@ export interface AccountConfig {
     tunnels: Record<string, string>;
     /** UUID of the reusable Access policy "staff" (web apps, staff tunnel routes). */
     staff_policy_id: string;
-    /** People allowed to SSH (inline Allow policies on the ssh- apps and the infrastructure app). */
-    ssh_admin_emails: string[];
     /** Every Access service token the files may name, by name -> token UUID. */
     service_tokens: Record<string, string>;
     /** Service-token names (keys of service_tokens) allowed to SSH into Deploy targets, per environment. */
@@ -67,6 +65,10 @@ export interface AccountConfig {
   telegram?: {
     chat_id: string;
   };
+  /** The only email domain allowed in droplet ssh lists and in ssh_groups (lowercase, e.g. example.com). */
+  ssh_email_domain: string;
+  /** SSH groups a droplet's ssh list may name: name -> emails (lowercase, deduplicated, sorted). {} when the file has none. */
+  ssh_groups: Record<string, string[]>;
   ssh_config: {
     /** First comment line of the generated file, e.g. "Example Co droplets". Keeps org names out of this repo. */
     title: string;
@@ -187,6 +189,11 @@ export interface DropletFile {
   deploy: boolean;
   /** The plan shows this droplet's changes, but apply skips them (e.g. a droplet that needs an owner's go-ahead). */
   frozen: boolean;
+  /**
+   * SSH access list: group names (keys of account ssh_groups) and/or emails, as written (at least
+   * one). Who may SSH into this droplet, always as ubuntu.
+   */
+  ssh: string[];
   web?: WebSpec;
   /** undefined: default monitors (one per site hostname when web is set). [] : none. */
   monitors?: MonitorSpec[];

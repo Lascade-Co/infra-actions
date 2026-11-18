@@ -228,7 +228,7 @@ describe("deletion", () => {
     const blocked = await run(f, { account: testAccount({ guards: { max_deletes: 100, max_delete_fraction: 0.3 } }) });
     expect(f.calls.slice(before).filter((c) => c.method === "DELETE")).toEqual([]);
     expect(f.calls.slice(before).some((c) => c.method === "PUT" && c.path.includes("cfd_tunnel"))).toBe(false);
-    expect(diags(blocked, "cloudflare-guard").map((d) => [d.level, d.message])).toEqual([["warning", expect.stringMatching(/refusing to delete 40 of 50 managed objects/)]]);
+    expect(diags(blocked, "cloudflare-guard").map((d) => [d.level, d.message])).toEqual([["warning", expect.stringMatching(/refusing to delete 40 of 51 managed objects/)]]);
     expect(blocked.errors).toEqual([]);
     expect(blocked.plan.ops.filter((o) => o.action === "report")).toHaveLength(40);
     expect(blocked.plan.ops.filter((o) => o.action === "delete")).toEqual([]);
@@ -325,15 +325,17 @@ describe("updates", () => {
     expect(f.apps.filter((a) => a.domain === "ssh-click.example.com")).toHaveLength(1);
   });
 
-  it("updates app policies in place (keeping policy ids) when the admin list changes", async () => {
+  it("updates app policies in place (keeping policy ids) when an SSH group changes", async () => {
     const f = exampleFixture();
     await run(f);
     const app = f.apps.find((a) => a.domain === "ssh-click.example.com")!;
     const polId = app.policies![0]!.id;
     const before = f.calls.length;
-    await run(f, { account: testAccount({ ssh_admin_emails: ["admin@example.com"] }) });
+    await run(f, { account: { ...testAccount(), ssh_groups: { admins: ["admin@example.com"] } } });
     const puts = f.calls.slice(before).filter((c) => c.method === "PUT" && c.path.includes("/access/apps/"));
-    expect(puts.length).toBe(3); // 2 ssh- apps + the infrastructure app
+    // The 2 ssh- apps. The infrastructure app belongs to the access set: a new set's app is
+    // created and the old set's deleted (test/cloudflare/ssh-access.test.ts).
+    expect(puts.length).toBe(2);
     const updated = f.apps.find((a) => a.id === app.id)!;
     expect(updated.policies?.[0]).toMatchObject({ id: polId, include: [{ email: { email: "admin@example.com" } }] });
   });

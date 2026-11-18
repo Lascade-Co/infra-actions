@@ -2,6 +2,7 @@
 name: worker-2.example.com
 profile: ubuntu-4
 env: prod
+ssh: [admins]
 swarm:
   cluster: jobs
 allow:

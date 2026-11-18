@@ -5,6 +5,7 @@ name: shop.example.com
 description: Storefront (example)
 env: prod
 deploy: true
+ssh: [admins, shop-team]   # groups from account.yaml ssh_groups
 web:
   exposure: public
   origin: http://{ip}:80

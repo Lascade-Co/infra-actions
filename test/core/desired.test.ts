@@ -65,8 +65,8 @@ describe("buildDesired", () => {
 
   it("applies web defaults the way the Worker does", async () => {
     const files = await exampleWith({
-      "droplets/a.example.com.yaml": "name: a.example.com\nweb:\n  exposure: public\n",
-      "droplets/b.example.com.yaml": "name: b.example.com\nenv: prod\ndeploy: true\nweb:\n  exposure: staff\n  hostnames: [b.example.net]\n",
+      "droplets/a.example.com.yaml": "name: a.example.com\nssh: [admins]\nweb:\n  exposure: public\n",
+      "droplets/b.example.com.yaml": "name: b.example.com\nssh: [admins]\nenv: prod\ndeploy: true\nweb:\n  exposure: staff\n  hostnames: [b.example.net]\n",
     });
     const d = buildDesired(loadInfraFiles(files).config!, [observedDroplet("a.example.com"), observedDroplet("b.example.com")]);
     const a = d.droplets.find((x) => x.name === "a.example.com")!;
@@ -100,7 +100,7 @@ describe("buildDesired", () => {
   });
 
   it("keeps naming problems as namingError for the checks to report", async () => {
-    const files = await exampleWith({ "droplets/x.example.org.yaml": "name: x.example.org\n" });
+    const files = await exampleWith({ "droplets/x.example.org.yaml": "name: x.example.org\nssh: [admins]\n" });
     const d = buildDesired(loadInfraFiles(files).config!, [observedDroplet("x.example.org")]);
     const x = d.droplets.find((y) => y.name === "x.example.org")!;
     expect(x.sshHostname).toBeUndefined();
