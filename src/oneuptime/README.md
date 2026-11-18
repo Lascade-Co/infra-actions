@@ -45,7 +45,7 @@ From the infra-sync Worker, take the probe rules and target list from `src/healt
 
 **A monitor.**
 - **Fields:** a `Website` monitor named `<hostname><path>`, every minute (`* * * * *`), one step: `GET https://<hostname><path>` without following redirects (as the Worker's `redirect: "manual"`). Its description is `managed-by:infra-sync <key> (droplets/<file>; edits made here are overwritten)`.
-- **Ownership and identity:** the description's first word is the marker, and its second word is the key. A monitor whose description is only the marker is identified by its name.
+- **Ownership and identity:** the description's first word is the marker (so a description starting `managed-by:infra-sync2` is not the tool's), and its second word is the key, so a monitor renamed by hand keeps its identity. When that word isn't shaped like `<hostname><path>`, or the description is only the marker, the monitor's name is the key.
 - **Criteria,** judged in order, where the first match decides:
   1. *(only with `acceptApp404`)* `infra-sync: app 404 counts as up`. All of: online, status 404, and the body does not contain `error code: 1`. That body filter matches nothing on an empty body, so the tunnel's empty 404 still fails.
   2. `infra-sync: offline`. Any of: not online, status ≥ 400, status < 200. It sets the project's offline status and opens an auto-resolving incident at the most severe incident severity, paging `on_call_policy_ids`.

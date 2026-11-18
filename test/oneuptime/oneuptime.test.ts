@@ -166,6 +166,7 @@ describe("oneuptime observe", () => {
   it("ownedKey reads the key after the marker, else the name", () => {
     expect(ownedKey("managed-by:infra-sync a.example.com/x (droplets/a.example.com.yaml)", "n")).toBe("a.example.com/x");
     expect(ownedKey("managed-by:infra-sync", "n")).toBe("n");
+    expect(ownedKey("managed-by:infra-sync note: paused for maintenance", "a.example.com/")).toBe("a.example.com/");
     expect(ownedKey("managed-by:infra-syncx", "n")).toBeUndefined();
     expect(ownedKey(undefined, "n")).toBeUndefined();
   });

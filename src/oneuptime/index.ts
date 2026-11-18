@@ -72,11 +72,17 @@ const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 /** The marker as the description's first word ("managed-by:infra-sync2" is not ours). */
 const OWNED_RE = new RegExp(`^${escapeRe(DNS_COMMENT_MARKER)}(?:\\s+(\\S+))?(?:\\s|$)`);
 
-/** The monitor's key when the tool owns it, else undefined. */
+/** A key: "<hostname><path>", e.g. app.example.com/healthcheck/. */
+const KEY_RE = /^[a-z0-9-]+(\.[a-z0-9-]+)+\/\S*$/;
+
+/**
+ * The monitor's key when the tool owns it, else undefined: the word after the marker when it
+ * looks like a key (so a renamed monitor keeps its identity), else the monitor's name.
+ */
 export function ownedKey(description: string | undefined, name: string): string | undefined {
   const m = OWNED_RE.exec(description ?? "");
   if (!m) return undefined;
-  return m[1] ?? name;
+  return m[1] && KEY_RE.test(m[1]) ? m[1] : name;
 }
 
 export const monitorKey = (m: Pick<DesiredMonitor, "hostname" | "path">): string => `${m.hostname}${m.path}`;
