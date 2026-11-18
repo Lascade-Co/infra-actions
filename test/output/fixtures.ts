@@ -78,3 +78,11 @@ export function cleanReport(mode: RunReport["mode"]): RunReport {
   r.credentials = [{ name: "INFRA_GH_TOKEN", expiresAt: "2027-06-01T00:00:00.000Z" }];
   return r;
 }
+
+/** Droplets were created, then re-planning failed: the engine stopped part-way. */
+export function stoppedReport(): RunReport {
+  const r = checkReport({ mode: "apply", diagnostics: [] });
+  r.applied = [{ module: "droplets", applied: [OPS.newDroplet], failed: [], skipped: [] }];
+  r.stages.push({ stage: "apply droplets", status: "ok" }, { stage: "apply", status: "skipped", error: "re-planning after droplet changes failed; nothing else applied" });
+  return r;
+}

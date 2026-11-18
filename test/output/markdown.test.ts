@@ -8,7 +8,8 @@ import {
   renderDriftReport,
   renderPrComment,
 } from "../../src/output/index.js";
-import { applyReport, checkReport, cleanReport, driftReport, op } from "./fixtures.js";
+import { freezeOps } from "../../src/engine.js";
+import { applyReport, checkReport, cleanReport, driftReport, op, OPS, stoppedReport } from "./fixtures.js";
 
 const count = (s: string, sub: string) => s.split(sub).length - 1;
 const balanced = (s: string) => expect(count(s, "<details>")).toBe(count(s, "</details>"));
@@ -55,6 +56,17 @@ describe("renderPrComment", () => {
     expect(changes).not.toContain("old.example.com");
   });
 
+  it("shows ops the engine froze under frozen droplets", () => {
+    const r = checkReport();
+    const tags = op({ provider: "digitalocean", module: "droplets", kind: "droplet-tags", key: "cold.example.com", action: "update", reason: "tags differ", droplet: "cold.example.com" });
+    r.plans[0] = freezeOps({ module: "droplets", ops: [OPS.newDroplet, tags], unchanged: 0, diagnostics: [] }, new Set(["cold.example.com"]));
+    const md = renderPrComment(r);
+    const frozen = md.slice(md.indexOf("<details><summary>Frozen droplets: changes shown, never applied (1)</summary>"));
+    expect(frozen.length).toBeLessThan(md.length);
+    expect(frozen).toContain("droplet-tags `cold.example.com`: frozen droplet, would update: tags differ");
+    expect(md.slice(0, md.indexOf("<details><summary>Frozen"))).not.toContain("cold.example.com");
+  });
+
   it("lists droplets with no file", () => {
     expect(renderPrComment(checkReport())).toContain("- `build-box` (nyc1, id 77)");
   });
@@ -65,8 +77,8 @@ describe("renderPrComment", () => {
     r.stages.push({ stage: "observe oneuptime", status: "failed", error: "ApiError: oneuptime GET /monitor: HTTP 503" });
     r.stages.push({ stage: "plan firewall", status: "not-implemented", error: "firewall.diff is not implemented yet" });
     const md = renderPrComment(r);
-    expect(md).toContain("❌ **Checks failed.**");
-    expect(md).toContain("the apply runs only when the plan has no errors");
+    expect(md).toContain("❌ **Checks failed. Don't merge this yet:** fix the errors below first.");
+    expect(md).toContain("the apply after a merge would not necessarily stop for them");
     const errs = md.indexOf("### ❌ Errors (3)");
     expect(errs).toBeGreaterThan(0);
     expect(errs).toBeLessThan(md.indexOf("### ⚠️ Warnings"));
@@ -145,6 +157,16 @@ describe("renderApplySummary", () => {
     expect(md).toContain("## infra apply: ⛔ blocked: nothing was applied");
     expect(md).toContain("**Nothing was applied:** the plan has errors or failed stages; nothing applied.");
     expect(md).toContain("### Planned, not applied (7)");
+  });
+
+  it("says when apply stopped part-way, listing only what was not applied", () => {
+    const md = renderApplySummary(stoppedReport());
+    expect(md).toContain("## infra apply: ❌ stopped part-way");
+    expect(md).toContain("**Stopped part-way:** re-planning after droplet changes failed; nothing else applied.");
+    expect(md).toContain("### Applied (1)");
+    const notApplied = md.slice(md.indexOf("### Planned, not applied (6)"));
+    expect(notApplied).toContain("`A vpc-shop.example.com`");
+    expect(notApplied).not.toContain("DigitalOcean droplet `new.example.com`");
   });
 
   it("says when there was nothing to change", () => {

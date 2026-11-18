@@ -4,7 +4,7 @@ import type { PlanOp, RunContext } from "../../src/core/plan.js";
 import { MissingSecretError, Secrets } from "../../src/core/secrets.js";
 import { MESSAGE_MAX, packMessages, renderTelegram, sendTelegram, stripHtml } from "../../src/output/index.js";
 import { exampleFiles } from "../helpers.js";
-import { applyReport, checkReport, cleanReport, driftReport, op } from "./fixtures.js";
+import { applyReport, checkReport, cleanReport, driftReport, op, stoppedReport } from "./fixtures.js";
 
 const TOKEN = "tg-secret-value-0007";
 
@@ -50,6 +50,31 @@ describe("renderTelegram", () => {
     expect(msg).toContain("⏸ 7 not applied");
     expect(msg).toContain("• error: bad &lt;thing&gt; &amp; more");
     expect(msg).toContain("⏸ <b>Not applied</b>: DNS records (2)");
+  });
+
+  it("says when apply stopped part-way, without listing what was applied as not applied", () => {
+    const [msg] = renderTelegram(stoppedReport());
+    expect(msg!.startsWith("❌ <b>infra apply</b>")).toBe(true);
+    expect(msg).toContain("🛑 <b>Stopped part-way</b>: re-planning after droplet changes failed; nothing else applied");
+    expect(msg).toContain("➕ 1 created");
+    expect(msg).toContain("⏸ 6 not applied");
+    expect(msg).not.toContain("⏸ <b>Not applied</b>: Droplets");
+  });
+
+  it("never cuts a tag or an entity when clipping long text", () => {
+    const r = applyReport();
+    r.applied[1]!.failed.push({ op: op({ kind: "dns-record", key: "A long.example.com" }), error: `bad <value> & ${"z".repeat(600)}` });
+    r.applied[1]!.skipped.push(
+      ...Array.from({ length: 60 }, (_, i) => ({ op: op({ kind: "dns-record", key: `A s${i}.example.com`, droplet: `d${i}.example.com` }), reason: "waiting for a droplet that isn't up yet" })),
+    );
+    const msgs = renderTelegram(r);
+    for (const m of msgs) {
+      expectBalanced(m);
+      expect(m).not.toMatch(/&[a-z]*…/);
+    }
+    const all = msgs.join("\n");
+    expect(all).toContain("bad &lt;value&gt; &amp; zzz");
+    expect(all).toContain("• A s59.example.com <i>(d59.example.com)</i>: <i>waiting for a droplet that isn't up yet</i>");
   });
 
   it("drift: hand-made changes, droplets with no file and the token warning, short", () => {

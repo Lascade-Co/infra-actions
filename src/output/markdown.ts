@@ -7,7 +7,7 @@ import { reportCounts, reportPassed, type RunReport } from "../core/report.js";
 import {
   allDiagnostics,
   allOps,
-  applyBlocked,
+  applyStopped,
   brokenStages,
   byDroplet,
   changeText,
@@ -221,7 +221,7 @@ export function renderPrComment(r: RunReport): string {
   let verdict: string;
   if (!passed) {
     verdict =
-      "❌ **Checks failed.** Fix the errors below. Merged as it is, this changes nothing: the apply runs only when the plan has no errors.";
+      "❌ **Checks failed. Don't merge this yet:** fix the errors below first. Some of them (a removed droplet file whose droplet still exists, an API that was down) are only caught here, so the apply after a merge would not necessarily stop for them.";
   } else if (changes.length) {
     verdict = `✅ **Checks passed.** Merging this applies the ${changes.length} change(s) below to the live accounts.`;
   } else {
@@ -255,14 +255,15 @@ export function renderPrComment(r: RunReport): string {
 export function renderApplySummary(r: RunReport): string {
   const c = reportCounts(r);
   const ops = allOps(r);
-  const blocked = applyBlocked(r);
+  const stop = applyStopped(r);
   const applied = r.applied.flatMap((a) => a.applied);
   const failed = r.applied.flatMap((a) => a.failed);
   const skipped = r.applied.flatMap((a) => a.skipped).filter((s) => s.op.action !== "report");
   const doc = new Doc();
 
   let status: string;
-  if (blocked) status = "⛔ blocked: nothing was applied";
+  if (stop?.partial) status = "❌ stopped part-way";
+  else if (stop) status = "⛔ blocked: nothing was applied";
   else if (!reportPassed(r)) status = applied.length ? "❌ partly applied, with failures" : "❌ failed";
   else if (applied.length) status = "✅ applied";
   else status = "ℹ️ nothing to change";
@@ -272,13 +273,13 @@ export function renderApplySummary(r: RunReport): string {
     "",
     `Applied ${applied.length} · failed ${failed.length} · skipped ${skipped.length} · report only ${c.report}${commitNote(r)}.`,
   );
-  if (blocked) doc.always("", `**Nothing was applied:** ${mdText(blocked)}.`);
+  if (stop) doc.always("", `**${stop.partial ? "Stopped part-way" : "Nothing was applied"}:** ${mdText(stop.reason)}.`);
 
   const failedItems = failed.map((f) => `- **${f.op.action}** ${PROVIDER_LABEL[f.op.provider]} ${f.op.kind} ${code(f.op.key)}${f.op.droplet ? ` (${code(f.op.droplet)})` : ""}: ${mdText(clip(f.error, MESSAGE_MAX))}`);
   errorsSection(doc, r, failedItems);
   warningsSections(doc, r);
   opsByDroplet(doc, "Applied", applied, { provider: true });
-  if (blocked) opsByDroplet(doc, "Planned, not applied", ops.filter(isChange), { provider: true });
+  if (stop) opsByDroplet(doc, "Planned, not applied", stop.notApplied, { provider: true });
   for (const [reason, group] of groupBy(skipped, (s) => s.reason)) {
     collapsed(doc, `Skipped: ${mdText(reason)}`, group.map((s) => opItem(s.op, { provider: true })));
   }

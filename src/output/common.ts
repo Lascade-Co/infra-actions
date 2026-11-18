@@ -44,10 +44,28 @@ export const isOtherReport = (op: PlanOp): boolean => op.action === "report" && 
 /** Stages that failed or aren't implemented: errors. */
 export const brokenStages = (r: RunReport): StageResult[] => r.stages.filter((s) => s.status === "failed" || s.status === "not-implemented");
 
-/** The reason apply did nothing, when the engine blocked it. */
-export function applyBlocked(r: RunReport): string | undefined {
+export interface ApplyStop {
+  /** The engine's reason. */
+  reason: string;
+  /** true: some ops were applied before it stopped (e.g. droplets were created, then re-planning failed). */
+  partial: boolean;
+  /** Planned changes that were neither applied nor failed. */
+  notApplied: PlanOp[];
+}
+
+const opId = (op: PlanOp) => `${op.provider} ${op.kind} ${op.key}`;
+
+/** Set when the engine stopped the apply (a skipped "apply" stage): before anything, or part-way. */
+export function applyStopped(r: RunReport): ApplyStop | undefined {
   const s = r.stages.find((x) => x.stage === "apply" && x.status === "skipped");
-  return s ? (s.error ?? "apply was skipped") : undefined;
+  if (!s) return undefined;
+  const done = new Set(r.applied.flatMap((a) => [...a.applied, ...a.failed.map((f) => f.op)]).map(opId));
+  const applied = r.applied.reduce((n, a) => n + a.applied.length + a.failed.length, 0);
+  return {
+    reason: s.error ?? "apply was skipped",
+    partial: applied > 0,
+    notApplied: allOps(r).filter((op) => op.action !== "report" && !done.has(opId(op))),
+  };
 }
 
 /** The time a report is about: when it finished, or (while the engine is still finishing it) started. */

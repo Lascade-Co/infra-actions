@@ -5,7 +5,7 @@
 import { formatDiagnostic } from "../core/diagnostics.js";
 import { isChange, type PlanOp, type RunContext } from "../core/plan.js";
 import { reportCounts, reportPassed, type RunReport } from "../core/report.js";
-import { allDiagnostics, allOps, applyBlocked, brokenStages, byKind, credentialChecks, groupBy, KIND_LABEL, opLabel, reportTime } from "./common.js";
+import { allDiagnostics, allOps, applyStopped, brokenStages, byKind, credentialChecks, KIND_LABEL, opLabel, reportTime } from "./common.js";
 
 export const MESSAGE_MAX = 3800; // Telegram allows 4096; leaves room for the "(1/3) " prefix
 const BLOCK_MAX = 3400;
@@ -19,6 +19,10 @@ export const stripHtml = (s: string): string =>
   s.replace(/<[^>]+>/g, "").replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&amp;/g, "&");
 
 const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+/** Raw text longer than this is cut before it is escaped (so no tag or entity is ever cut). */
+const TEXT_MAX = 300;
+const clip = (s: string, n = TEXT_MAX) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
 /** "19 Nov 2026, 05:30 IST" (no clock of its own: the time comes from the report). */
 export function when(d: Date): string {
@@ -55,7 +59,8 @@ export function listBlocks(title: string, items: string[], expandable: boolean):
     part++;
   };
   for (const raw of items) {
-    const line = raw.length > 500 ? raw.slice(0, 499) + "…" : raw;
+    // Items clip their raw text; this is the last guard, and it drops the tags rather than cut one.
+    const line = raw.length > 500 ? esc(clip(stripHtml(raw), 499)) : raw;
     if (len + line.length + 1 > BLOCK_MAX - title.length - 60) flush();
     cur.push(line);
     len += line.length + 1;
@@ -82,7 +87,7 @@ export function packMessages(blocks: string[], max = MESSAGE_MAX): string[] {
 
 const item = (op: PlanOp): string => {
   const label = opLabel(op);
-  return `${esc(label)}${op.droplet && !label.includes(op.droplet) ? ` <i>(${esc(op.droplet)})</i>` : ""}`;
+  return `${esc(clip(label, 150))}${op.droplet && !label.includes(op.droplet) ? ` <i>(${esc(clip(op.droplet, 100))})</i>` : ""}`;
 };
 
 /** One block list per kind of object, collapsed. */
@@ -96,7 +101,7 @@ function kindBlocks(emoji: string, verb: string, ops: PlanOp[], line: (op: PlanO
 export function telegramBlocks(r: RunReport): string[] {
   const c = reportCounts(r);
   const ops = allOps(r);
-  const blocked = applyBlocked(r);
+  const stop = applyStopped(r);
   const creds = credentialChecks(r).filter((x) => x.level === "error" || x.level === "warning");
   const applied = r.applied.flatMap((a) => a.applied);
   const failed = r.applied.flatMap((a) => a.failed);
@@ -104,13 +109,13 @@ export function telegramBlocks(r: RunReport): string[] {
   const changes = ops.filter(isChange);
   const drift = r.mode === "drift";
 
-  const hasErrors = !reportPassed(r) || !!blocked || creds.some((x) => x.level === "error");
+  const hasErrors = !reportPassed(r) || !!stop || creds.some((x) => x.level === "error");
   const hasWarn = c.warnings > 0 || creds.length > 0 || (drift && (changes.length > 0 || c.unmanaged > 0));
   const status = hasErrors ? "❌" : hasWarn ? "⚠️" : (r.mode === "apply" && applied.length) || drift ? "✅" : "ℹ️";
 
   const title = drift ? "infra drift report" : `infra ${r.mode}`;
   const head = [`${status} <b>${title}</b>${r.infraCommit ? ` · <code>${esc(r.infraCommit.slice(0, 7))}</code>` : ""}`];
-  if (blocked) head.push(`🛑 <b>Nothing applied</b>: ${esc(blocked)}`);
+  if (stop) head.push(`🛑 <b>${stop.partial ? "Stopped part-way" : "Nothing applied"}</b>: ${esc(clip(stop.reason))}`);
   head.push(`🕒 ${when(reportTime(r))}`);
 
   const counts: string[] = [];
@@ -127,7 +132,7 @@ export function telegramBlocks(r: RunReport): string[] {
     if (done.delete) counts.push(`🗑 ${done.delete} deleted`);
     if (failed.length) counts.push(`💥 ${failed.length} failed`);
     if (skipped.length) counts.push(`⏭ ${skipped.length} skipped`);
-    if (blocked && changes.length) counts.push(`⏸ ${changes.length} not applied`);
+    if (stop?.notApplied.length) counts.push(`⏸ ${stop.notApplied.length} not applied`);
   }
   if (c.report) counts.push(`📋 ${c.report} report-only`);
   const nothing = drift ? "No drift: the live accounts match the droplet files." : "No changes, nothing to report.";
@@ -137,11 +142,11 @@ export function telegramBlocks(r: RunReport): string[] {
 
   // Problems first, never collapsed.
   const errors = [
-    ...failed.map((f) => `• <b>${esc(f.op.kind)}</b> ${esc(opLabel(f.op))}: ${esc(f.error)}`),
+    ...failed.map((f) => `• <b>${esc(f.op.kind)}</b> ${esc(clip(opLabel(f.op), 150))}: ${esc(clip(f.error))}`),
     ...allDiagnostics(r)
       .filter((d) => d.level === "error")
-      .map((d) => `• ${esc(formatDiagnostic(d))}`),
-    ...brokenStages(r).map((s) => `• stage ${esc(s.stage)} ${s.status}${s.error ? `: ${esc(s.error)}` : ""}`),
+      .map((d) => `• ${esc(clip(formatDiagnostic(d)))}`),
+    ...brokenStages(r).map((s) => `• stage ${esc(s.stage)} ${s.status}${s.error ? `: ${esc(clip(s.error))}` : ""}`),
     ...creds.filter((x) => x.level === "error").map((x) => `• 🔑 ${esc(x.name)} ${esc(x.text)}`),
   ];
   if (errors.length) blocks.push(...listBlocks(`❌ <b>Errors</b> (${errors.length})`, errors, false));
@@ -149,7 +154,7 @@ export function telegramBlocks(r: RunReport): string[] {
     ...creds.filter((x) => x.level === "warning").map((x) => `• 🔑 ${esc(x.name)} ${esc(x.text)}: renew it`),
     ...allDiagnostics(r)
       .filter((d) => d.level === "warning")
-      .map((d) => `• ${esc(formatDiagnostic(d))}`),
+      .map((d) => `• ${esc(clip(formatDiagnostic(d)))}`),
   ];
   if (warnings.length) blocks.push(...listBlocks(`⚠️ <b>Warnings</b> (${warnings.length})`, warnings, false));
 
@@ -169,9 +174,9 @@ export function telegramBlocks(r: RunReport): string[] {
     ["delete", "🗑", "Deleted"],
   ];
   for (const [action, emoji, verb] of verbs) blocks.push(...kindBlocks(emoji, verb, applied.filter((op) => op.action === action)));
-  if (blocked) blocks.push(...kindBlocks("⏸", "Not applied", changes, (op) => `• ${esc(op.action)} ${item(op)}`));
+  if (stop) blocks.push(...kindBlocks("⏸", "Not applied", stop.notApplied, (op) => `• ${esc(op.action)} ${item(op)}`));
   if (skipped.length) {
-    const items = [...groupBy(skipped, (s) => s.reason)].map(([reason, xs]) => `• <i>${esc(reason)}</i> (${xs.length}): ${xs.map((s) => item(s.op)).join(", ")}`);
+    const items = skipped.map((s) => `• ${item(s.op)}: <i>${esc(clip(s.reason))}</i>`);
     blocks.push(...listBlocks(`⏭ <b>Skipped</b> (${skipped.length})`, items, true));
   }
   return blocks;
