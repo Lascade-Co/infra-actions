@@ -1,0 +1,11 @@
+# A swarm worker in the same cluster, created from a profile.
+name: worker-2.example.com
+profile: ubuntu-4
+env: prod
+swarm:
+  cluster: jobs
+allow:
+  tunnel:
+    - route: worker-2-metrics.example.com
+      port: 9100/udp
+      who: [staff]

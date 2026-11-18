@@ -1,0 +1,10 @@
+# A droplet the tool creates (it has a profile): staging, so it goes to the staging region.
+# Staff-only site; monitors default to one per site hostname.
+name: staging-shop.example.com
+description: Storefront staging (example)
+profile: ubuntu-6
+env: staging
+deploy: true
+web:
+  exposure: staff
+  origin: http://{ip}:80

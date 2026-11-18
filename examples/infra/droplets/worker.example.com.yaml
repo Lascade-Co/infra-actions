@@ -1,0 +1,7 @@
+# A swarm manager with no site.
+name: worker.example.com
+env: prod
+swarm:
+  cluster: jobs
+  role: manager
+  encrypted_overlay: false

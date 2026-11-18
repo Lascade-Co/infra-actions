@@ -1,0 +1,5 @@
+name: ubuntu-6
+description: 1 vCPU, 1 GB, 25 GB ($6/month). Latest Ubuntu LTS, user ubuntu, SSH through Cloudflare only.
+size: s-1vcpu-1gb
+image: ubuntu-26-04-x64
+user_data: ubuntu.cloud-init

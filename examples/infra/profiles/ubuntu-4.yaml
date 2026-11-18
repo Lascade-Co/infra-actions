@@ -1,0 +1,5 @@
+name: ubuntu-4
+description: 1 vCPU, 512 MB, 10 GB ($4/month). Latest Ubuntu LTS, user ubuntu, SSH through Cloudflare only.
+size: s-1vcpu-512mb-10gb
+image: ubuntu-26-04-x64
+user_data: ubuntu.cloud-init

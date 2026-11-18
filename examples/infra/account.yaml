@@ -1,0 +1,51 @@
+# Account-level values the tool needs. EXAMPLE ONLY: every value here is fake.
+# The real file lives in the private infra repo. No secrets: tokens come from environment variables.
+
+cloudflare:
+  account_id: 0123456789abcdef0123456789abcdef
+  team_domain: https://example.cloudflareaccess.com
+  zones: [example.com, example.net]
+  tunnels:
+    nyc1: 00000000-0000-4000-8000-000000000001
+    blr1: 00000000-0000-4000-8000-000000000002
+  staff_policy_id: 00000000-0000-4000-8000-000000000010
+  ssh_admin_emails:
+    - admin@example.com
+    - ops@example.com
+  service_tokens:
+    ci-prod: 00000000-0000-4000-8000-000000000101
+    ci-staging: 00000000-0000-4000-8000-000000000102
+    ci-internal: 00000000-0000-4000-8000-000000000103
+    etl: 00000000-0000-4000-8000-000000000104
+    uptime: 00000000-0000-4000-8000-000000000105
+  ci_deploy_tokens:
+    prod: [ci-prod]
+    staging: [ci-staging]
+    internal: [ci-internal]
+  guards:
+    max_deletes: 20
+    max_delete_fraction: 0.3
+
+digitalocean:
+  regions:
+    prod: nyc1
+    staging: blr1
+    internal: blr1
+
+oneuptime:
+  url: https://status.example.com
+  project_id: 00000000-0000-4000-8000-000000000201
+  on_call_policy_ids:
+    - 00000000-0000-4000-8000-000000000202
+
+github:
+  infra_repo: example-org/infra
+  ssh_config_branch: ssh-config
+  ssh_config_file: ssh_config
+
+telegram:
+  chat_id: "-1000000000000"
+
+ssh_config:
+  title: Example Co droplets
+  user: ubuntu

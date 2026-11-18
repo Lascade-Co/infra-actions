@@ -1,0 +1,22 @@
+# No website: only an SSH route, a Private name and access rules. Frozen: plans show its
+# changes, apply skips them until the owner removes `frozen`.
+name: db.example.com
+description: Analytics database (example)
+env: prod
+frozen: true
+monitors: []
+allow:
+  droplet:
+    - from: shop.example.com
+      ports: [5432/tcp]
+    - from: worker.example.com
+      ports: [5432/tcp, 9000-9001/tcp]
+  tunnel:
+    - route: db-etl.example.com
+      port: 5432/tcp
+      who: [service-token:etl, staff]
+      note: nightly ETL job outside the account
+  ip:
+    - from: 192.0.2.10
+      ports: [5432/tcp]
+      note: office backup box with a fixed address and no cloudflared

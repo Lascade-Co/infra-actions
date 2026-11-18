@@ -1,0 +1,25 @@
+# An adopted droplet (it existed before the repo; no profile): a public site with a brand
+# hostname, a webhook open to everyone, and an API path open to a partner's addresses and
+# a service token.
+name: shop.example.com
+description: Storefront (example)
+env: prod
+deploy: true
+web:
+  exposure: public
+  origin: http://{ip}:80
+  hostnames: [shop.example.net]
+  protected_paths: [/admin, /internal]
+  exceptions:
+    - path: /webhooks/payments
+      allow: everyone
+    - path: /api/partner
+      allow:
+        ips: [198.51.100.0/24, 203.0.113.9]
+        service_tokens: [uptime]
+  health_path: /healthcheck/
+allow:
+  droplet:
+    - from: worker.example.com
+      ports: [8080/tcp]
+      note: queue worker calls the internal API
