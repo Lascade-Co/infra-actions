@@ -33,14 +33,45 @@ These checks are pure functions that return `Diagnostic[]`. They never throw for
 **`checkDesired(desired)`** runs after the droplets are observed:
 
 - **Swarm members share one region.** A public advertise address can't be seen from the API; say so in the docs, don't guess.
-- **`allow.droplet` across regions** gets a warning: the public IP is used, with no VPC peering.
+- **`allow.droplet` across regions** gets a warning saying the caller's PUBLIC IP will be allowed (there is no VPC peering), and which IP that is.
 - **A file with a `profile` for a droplet that already exists** gets an info diagnostic: the profile is ignored, because droplets are create-only.
 - **A droplet in a region with no tunnel** gets a warning: it has no Cloudflare side.
 
-**`checkChange(base, head)`** runs only with `check --base <dir>`, the PR's base checkout:
+**`checkChange(base, head, desired?)`** runs only with `check --base <dir>`, the PR's base checkout. The engine calls it after the droplets are observed and passes the head's desired state (its `unmanaged` list holds every droplet that has no file in the head):
 
-- **A removed droplet file gets a warning.** Its Cloudflare side, monitors and ssh config entry will be deleted. The droplet itself keeps running, because the tool never deletes droplets.
-- **A changed `profile` on an existing droplet gets an info diagnostic:** nothing happens.
+- **A removed droplet file whose droplet still exists in DigitalOcean is an error** (`removed-droplet-exists`, decision 15). Retiring a droplet means deleting it by hand first (the tool is create-only), then merging the PR that removes its file. A renamed file counts as a removal, so the droplet must be renamed in DigitalOcean first.
+- **If the droplets couldn't be read, a removed file is an error** (`removed-droplet-unverified`): the check fails safe.
+- **A removed droplet file that other files still list in `allow.droplet` is an error** (`removed-droplet-referenced`). It is one diagnostic on the removed file, naming each referrer and its field. `checkConfig` also reports `unknown-droplet` on each referrer.
+- **A removed file whose droplet is gone gets a warning** (`droplet-file-removed`). Its Cloudflare side is deleted on merge (SSH route, private name, site, tunnel routes, Access apps), along with its ssh config entry. Its monitors are listed for removal by hand, because owned monitors are never deleted (decision 16).
+- **A changed `profile` on an existing droplet gets an info diagnostic** (`profile-changed`): nothing happens.
+
+Swarm peers need no reference check. Membership is by cluster name, so every peer is a droplet file by construction. Removing one is covered by the rules above and by the manager rule in `checkConfig`.
+
+## Diagnostic codes
+
+| Code | Level | Where |
+|---|---|---|
+| `naming`, `name-collision` | error | `name` |
+| `not-in-zone`, `not-one-level` | error | `name` (with `web`), `web.hostnames[i]`, `allow.tunnel[i].route` |
+| `hostname-claimed` | error | each claimer except a droplet's own name |
+| `unknown-profile` | error | `profile` |
+| `unknown-droplet` | error | `allow.droplet[i].from` |
+| `unknown-service-token` | error | `allow.tunnel[i].who[j]`, `web.exceptions[i].allow.service_tokens` |
+| `no-deploy-token` | warning | `deploy` |
+| `udp-needs-staff` | error | `allow.tunnel[i].port` |
+| `swarm-no-manager` | error | `swarm.role` of every member |
+| `swarm-overlay-mismatch` | error | `swarm.encrypted_overlay` of the minority |
+| `swarm-region` | error | `swarm.cluster` of members outside the main region |
+| `cross-region-caller` | warning | `allow.droplet[i].from` |
+| `profile-ignored` | info | `profile` |
+| `region-without-tunnel` | warning | the file |
+| `removed-droplet-exists`, `removed-droplet-unverified`, `removed-droplet-referenced` | error | the removed file |
+| `droplet-file-removed` | warning | the removed file |
+| `profile-changed` | info | `profile` |
+
+The loader keeps no YAML positions in `InfraConfig`, so these diagnostics have `file` and `path` but no `line`.
+
+**Not checked:** a swarm member's advertise address. The API doesn't show it, so the tool can't tell whether a member advertises a public address. Check it by hand (`docker node inspect`).
 
 ## Inputs and outputs
 
