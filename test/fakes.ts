@@ -17,6 +17,12 @@ export interface FakeOptions {
   failObserve?: Partial<Record<ModuleName, Error>>;
   /** Called with the token-bearing context, to prove it reaches modules. */
   onContext?: (ctx: RunContext) => void;
+  /** Modules whose apply throws this error, or ("op") reports its first op as failed. */
+  failApply?: Partial<Record<ModuleName, Error | "op">>;
+  /** checkDesired's result, per call (1-based): lets a re-plan find an error the first plan didn't. */
+  desiredDiagnostics?: (call: number) => Diagnostic[];
+  /** Extra diagnostics in the cloudflare plan. */
+  cloudflareDiagnostics?: Diagnostic[];
 }
 
 export interface FakeRun {
@@ -39,6 +45,14 @@ export function fakeModules(opts: FakeOptions): FakeRun {
     const e = opts.failObserve?.[m];
     if (e) throw e;
   };
+  /** applyAll, unless opts.failApply says this module fails. */
+  const applied = (m: ModuleName, ops: PlanOp[]): ApplyResult => {
+    const f = opts.failApply?.[m];
+    if (f instanceof Error) throw f;
+    if (f === "op" && ops.length) return { module: m, applied: [], failed: [{ op: ops[0]!, error: "HTTP 500" }], skipped: ops.slice(1).map((op) => ({ op, reason: "after a failure" })) };
+    return applyAll(m, ops);
+  };
+  let desiredCalls = 0;
 
   const modules = (ctx: RunContext): Modules => {
     contexts.push(ctx);
@@ -70,8 +84,9 @@ export function fakeModules(opts: FakeOptions): FakeRun {
       },
       apply: async (ops) => {
         calls.push(`apply droplets ${ops.length}`);
-        for (const op of ops) live.push(observedDroplet(op.key, { id: nextId++, privateIpv4: `10.0.0.${nextId - 400}` }));
-        return applyAll("droplets", ops);
+        const res = applied("droplets", ops);
+        for (const op of res.applied) live.push(observedDroplet(op.key, { id: nextId++, privateIpv4: `10.0.0.${nextId - 400}` }));
+        return res;
       },
     };
     const cloudflare: Provider<{ n: number }> = {
@@ -97,11 +112,11 @@ export function fakeModules(opts: FakeOptions): FakeRun {
             droplet: d.name,
             ...(d.privateIpv4 ? {} : { pending: true }),
           }));
-        return { module: "cloudflare", ops, unchanged: 0, diagnostics: [] };
+        return { module: "cloudflare", ops, unchanged: 0, diagnostics: [...(opts.cloudflareDiagnostics ?? [])] };
       },
       apply: async (ops) => {
         calls.push(`apply cloudflare ${ops.length}`);
-        return applyAll("cloudflare", ops);
+        return applied("cloudflare", ops);
       },
     };
     const firewall: Provider<{ n: number }> = {
@@ -134,7 +149,10 @@ export function fakeModules(opts: FakeOptions): FakeRun {
       module: "sshconfig",
       observe: async () => ({ sha: "abc" }),
       diff: () => ({ module: "sshconfig", ops: [], unchanged: 1, diagnostics: [] }),
-      apply: async (ops) => applyAll("sshconfig", ops),
+      apply: async (ops) => {
+        calls.push(`apply sshconfig ${ops.length}`);
+        return applied("sshconfig", ops);
+      },
       credentials: () => [{ name: "INFRA_GH_TOKEN", expiresAt: "2027-01-01" }],
     };
     return {
@@ -145,7 +163,7 @@ export function fakeModules(opts: FakeOptions): FakeRun {
           calls.push("checks");
           return opts.checkErrors ?? [];
         },
-        checkDesired: () => [],
+        checkDesired: () => opts.desiredDiagnostics?.(++desiredCalls) ?? [],
         checkChange: () => [],
       },
       notifier: {

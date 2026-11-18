@@ -3,9 +3,11 @@
 //   load -> offline checks -> observe droplets -> desired state -> checks against base (--base)
 //        -> checks on desired
 //        -> plan every module (observe + diff)
-//   apply only: stop if anything failed or any error was found; apply droplets; if droplets
-//        changed, re-observe them and re-plan the rest (new droplets now have IPs); apply each
-//        module's changes in registry order.
+//   apply only (all-or-nothing, decision 16): stop before writing anything if any stage failed
+//        or any error was found (checks, plan diagnostics); apply droplets; if droplets changed,
+//        re-observe them and re-plan the rest (new droplets now have IPs), stopping if that plan
+//        has errors; apply each module's changes in registry order. The first module that fails
+//        stops the run: the modules after it are skipped and reported as skipped.
 //   apply and drift: always end with the Telegram summary (also when apply was blocked).
 //
 // Each stage is recorded in the report (ok / failed / not-implemented / skipped). Error text
@@ -25,7 +27,11 @@ import { createModules, type Modules } from "./registry.js";
 export interface EngineOptions {
   mode: RunMode | "validate";
   infraDir: string;
-  /** check only: a checkout of the PR's base, for checkChange. */
+  /**
+   * check and apply: a checkout to compare against, for checkChange. check gets the PR's base;
+   * apply gets the commit main was at before the push (so a removed file whose droplet still
+   * exists stops the apply too, decision 15, even when a PR was merged with a failed check).
+   */
   baseDir?: string;
   infraCommit?: string;
   env: Record<string, string | undefined>;
@@ -166,7 +172,10 @@ export async function runEngine(opts: EngineOptions): Promise<RunReport> {
       const ch = await stages.run("checks against base", () => modules.checks.checkChange(b, config, desired));
       if (ch.ok) report.diagnostics.push(...ch.value);
     }
-    if (!state) return;
+    if (!state) {
+      if (mode === "apply") stages.skip("apply", "the droplets could not be read; nothing applied");
+      return;
+    }
     report.diagnostics.push(...state.desired.diagnostics);
     const desiredChecks = await stages.run("checks on desired state", () => modules.checks.checkDesired(state!.desired));
     if (desiredChecks.ok) report.diagnostics.push(...desiredChecks.value);
@@ -174,39 +183,71 @@ export async function runEngine(opts: EngineOptions): Promise<RunReport> {
 
     if (mode !== "apply") return;
 
-    // Nothing is written unless the whole plan is clean.
+    // All-or-nothing (decision 16), part 1: nothing is written unless the whole run is clean
+    // first: the checkout loads, every check ran without an error (checkConfig, checkDesired,
+    // and checkChange when --base is given) and every module observed and planned without an
+    // error. The PR check runs the same code, but merging is not blocked by a failed check.
     if (!reportPassed(report) || hasErrors(report.diagnostics)) {
       stages.skip("apply", "the plan has errors or failed stages; nothing applied");
       return;
     }
 
-    const applyOne = async (p: Planned) => {
+    /** Applies one module's ready ops. false when the module failed (threw, or an op failed). */
+    const applyOne = async (p: Planned): Promise<boolean> => {
       if (!p.plan) {
         stages.skip(`apply ${p.provider.module}`, "no plan");
-        return;
+        return true;
       }
       const ready = p.plan.ops.filter((op) => isChange(op) && !op.pending);
       const notReady: PlanOp[] = p.plan.ops.filter((op) => isChange(op) && op.pending);
       const res = await stages.run(`apply ${p.provider.module}`, () => p.provider.apply(ready, p.observed));
-      if (res.ok) {
-        res.value.skipped.push(...notReady.map((op) => ({ op, reason: "waiting for a droplet that isn't up yet" })));
-        report.applied.push(res.value);
-      }
+      if (!res.ok) return false;
+      res.value.skipped.push(...notReady.map((op) => ({ op, reason: "waiting for a droplet that isn't up yet" })));
+      report.applied.push(res.value);
+      return res.value.failed.length === 0;
+    };
+
+    // All-or-nothing, part 2: the first module that fails stops the run. The modules after it
+    // are not applied and are reported as skipped (stage "apply" says why).
+    const stop = (rest: Planned[], reason: string) => {
+      stages.skip("apply", reason);
+      for (const p of rest) stages.skip(`apply ${p.provider.module}`, reason);
     };
 
     const dropletChanges = state.droplets.plan?.ops.filter(isChange).length ?? 0;
-    await applyOne(state.droplets);
+    if (!(await applyOne(state.droplets))) {
+      stop(state.others, "applying droplets failed; nothing after it was applied");
+      return;
+    }
     if (dropletChanges > 0) {
-      // New droplets now have IPs, tags changed: plan everything again before applying the rest.
+      // New droplets now have IPs, tags changed: plan everything again before applying the rest,
+      // and hold the new plan to the same rule as the first one.
+      const firstStage = report.stages.length;
       const again = await plans();
       if (!again) {
-        stages.skip("apply", "re-planning after droplet changes failed; nothing else applied");
+        stop(state.others, "re-planning after droplet changes failed; nothing else applied");
         return;
       }
+      const seen = new Set(report.diagnostics.map((d) => JSON.stringify(d)));
+      const fresh = [...again.desired.diagnostics];
+      const rechecked = await stages.run("checks on desired state", () => modules.checks.checkDesired(again.desired));
+      if (rechecked.ok) fresh.push(...rechecked.value);
+      report.diagnostics.push(...fresh.filter((d) => !seen.has(JSON.stringify(d))));
       state = again;
-      record(state.desired, [state.droplets, ...state.others]);
+      const all = [state.droplets, ...state.others];
+      record(state.desired, all);
+      const broken = report.stages.slice(firstStage).some((st) => st.status === "failed" || st.status === "not-implemented");
+      if (broken || hasErrors(fresh) || hasErrors(all.flatMap((p) => p.plan?.diagnostics ?? []))) {
+        stop(state.others, "the plan made again after the droplet changes has errors or failed stages; nothing else applied");
+        return;
+      }
     }
-    for (const p of state.others) await applyOne(p);
+    for (const [i, p] of state.others.entries()) {
+      if (!(await applyOne(p))) {
+        stop(state.others.slice(i + 1), `applying ${p.provider.module} failed; nothing after it was applied`);
+        return;
+      }
+    }
   };
   await planAndApply();
 

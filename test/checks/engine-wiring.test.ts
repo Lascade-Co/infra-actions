@@ -23,15 +23,15 @@ afterEach(async () => {
   cleanup = undefined;
 });
 
-async function runWithRemovedTools(fake: Partial<FakeOptions>) {
+async function runWithRemovedTools(fake: Partial<FakeOptions>, mode: "check" | "apply" = "check") {
   const t = await tempDir();
   cleanup = t.cleanup;
   const head = join(t.dir, "infra");
   await cp(EXAMPLE_DIR, head, { recursive: true });
   await rm(join(head, "droplets", "tools.example.net.yaml"));
   const f = fakeModules({ droplets: EXISTING, ...fake });
-  return runEngine({
-    mode: "check",
+  const report = await runEngine({
+    mode,
     infraDir: head,
     baseDir: EXAMPLE_DIR,
     env: {},
@@ -45,6 +45,7 @@ async function runWithRemovedTools(fake: Partial<FakeOptions>) {
     now: () => new Date("2026-11-19T00:00:00Z"),
     sleep: async () => {},
   });
+  return Object.assign(report, { calls: f.calls });
 }
 
 describe("engine wiring of checkChange", () => {
@@ -60,6 +61,14 @@ describe("engine wiring of checkChange", () => {
     const report = await runWithRemovedTools({ droplets: EXISTING.filter((d) => d.name !== "tools.example.net") });
     expect(report.diagnostics.map((d) => d.code)).toContain("droplet-file-removed");
     expect(report.diagnostics.some((d) => d.level === "error")).toBe(false);
+  });
+
+  it("stops apply --base too: nothing is written while a removed file's droplet still exists", async () => {
+    const report = await runWithRemovedTools({}, "apply");
+    expect(report.diagnostics.map((d) => d.code)).toContain("removed-droplet-exists");
+    expect(report.calls.filter((c) => c.startsWith("apply"))).toEqual([]);
+    expect(report.stages.find((s) => s.stage === "apply")).toMatchObject({ status: "skipped" });
+    expect(report.applied).toEqual([]);
   });
 
   it("still runs, failing safe, when the droplets can't be read", async () => {

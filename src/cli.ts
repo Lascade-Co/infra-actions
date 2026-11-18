@@ -3,7 +3,10 @@
 //
 //   infra validate <infra-dir>              load + schema only (no API calls, no secrets)
 //   infra check    <infra-dir> [--base <dir>]  validate, checks, plan; read-only
-//   infra apply    <infra-dir>              plan, then apply (the only command that writes)
+//   infra apply    <infra-dir> [--base <dir>]  plan, then apply (the only command that writes);
+//                                           all-or-nothing: any error and nothing is written
+//   --base <dir>: a checkout to compare with (checkChange): the PR's base for check, the commit
+//   main was at before the push for apply.
 //   infra drift    <infra-dir>              read-only: droplets with no file, hand-made changes
 //
 // Options: --out <file> (detail report, markdown; default infra-report.md), --json <file>
@@ -50,7 +53,7 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     } else positional.push(a);
   }
   if (positional.length !== 1) return { error: USAGE };
-  if (flags.base && command !== "check") return { error: `--base is only for check\n${USAGE}` };
+  if (flags.base && command !== "check" && command !== "apply") return { error: `--base is only for check and apply\n${USAGE}` };
   if (flags.commit && !/^[0-9a-f]{7,40}$/.test(flags.commit)) return { error: "--commit must be a git sha" };
   return {
     command: command as Command,

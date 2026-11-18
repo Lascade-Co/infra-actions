@@ -106,6 +106,7 @@ describe("engine: apply", () => {
       // db.example.com is frozen: its op is a report op, so 5 of 6
       "apply cloudflare 5",
       "apply firewall 0",
+      "apply sshconfig 0",
     ]);
     const cf = report.applied.find((a) => a.module === "cloudflare")!;
     expect(cf.applied.every((o) => !o.pending)).toBe(true);
@@ -143,6 +144,111 @@ describe("engine: apply", () => {
   it("applies nothing when any stage failed", async () => {
     const { calls } = await run("apply", { failObserve: { cloudflare: new Error("timeout") } });
     expect(calls.filter((c) => c.startsWith("apply"))).toEqual([]);
+  });
+
+  it("applies nothing when checkDesired finds an error", async () => {
+    const { report, calls } = await run("apply", { desiredDiagnostics: () => [{ level: "error", code: "swarm-region", message: "members in two regions" }] });
+    expect(calls.filter((c) => c.startsWith("apply"))).toEqual([]);
+    expect(report.stages.find((s) => s.stage === "apply")).toMatchObject({ status: "skipped", error: "the plan has errors or failed stages; nothing applied" });
+  });
+
+  it("applies nothing when a module's plan has an error diagnostic", async () => {
+    const { report, calls } = await run("apply", { cloudflareDiagnostics: [{ level: "error", code: "cloudflare-dependent", message: "a DNS-only record depends on it" }] });
+    expect(calls.filter((c) => c.startsWith("apply"))).toEqual([]);
+    expect(report.applied).toEqual([]);
+    expect(reportPassed(report)).toBe(false);
+  });
+
+  const applyStages = (r: Awaited<ReturnType<typeof run>>["report"]) =>
+    r.stages.filter((s) => s.stage.startsWith("apply")).map((s) => [s.stage, s.status]);
+
+  it("stops after a droplets apply failure: later modules are skipped and reported as skipped", async () => {
+    const { report, calls } = await run("apply", { failApply: { droplets: "op" } }, { TELEGRAM_BOT_TOKEN: "x-telegram-token" });
+    expect(calls.filter((c) => c.startsWith("apply"))).toEqual(["apply droplets 2"]);
+    // No re-plan either.
+    expect(calls.filter((c) => c === "observe droplets")).toHaveLength(1);
+    expect(applyStages(report)).toEqual([
+      ["apply droplets", "ok"],
+      ["apply", "skipped"],
+      ["apply cloudflare", "skipped"],
+      ["apply firewall", "skipped"],
+      ["apply sshconfig", "skipped"],
+    ]);
+    expect(report.stages.find((s) => s.stage === "apply")!.error).toBe("applying droplets failed; nothing after it was applied");
+    expect(report.applied.map((a) => a.module)).toEqual(["droplets"]);
+    expect(reportPassed(report)).toBe(false);
+    expect(report.stages.at(-1)).toEqual({ stage: "notify telegram", status: "ok" });
+  });
+
+  it("stops when the droplets apply throws", async () => {
+    const { report, calls } = await run("apply", { failApply: { droplets: new Error("HTTP 503") } });
+    expect(calls.filter((c) => c.startsWith("apply"))).toEqual(["apply droplets 2"]);
+    expect(applyStages(report)).toEqual([
+      ["apply droplets", "failed"],
+      ["apply", "skipped"],
+      ["apply cloudflare", "skipped"],
+      ["apply firewall", "skipped"],
+      ["apply sshconfig", "skipped"],
+    ]);
+    expect(report.applied).toEqual([]);
+  });
+
+  it("stops at the first failing module after droplets, skipping the ones after it", async () => {
+    const { report, calls } = await run("apply", { failApply: { cloudflare: "op" } });
+    expect(calls.filter((c) => c.startsWith("apply"))).toEqual(["apply droplets 2", "apply cloudflare 5"]);
+    expect(applyStages(report)).toEqual([
+      ["apply droplets", "ok"],
+      ["apply cloudflare", "ok"],
+      ["apply", "skipped"],
+      ["apply firewall", "skipped"],
+      ["apply sshconfig", "skipped"],
+    ]);
+    expect(report.stages.find((s) => s.stage === "apply")!.error).toBe("applying cloudflare failed; nothing after it was applied");
+    expect(reportPassed(report)).toBe(false);
+  });
+
+  it("stops after creating droplets when the plan made again has an error", async () => {
+    const { report, calls } = await run("apply", {
+      desiredDiagnostics: (n) => (n === 1 ? [] : [{ level: "error", code: "swarm-region", message: "new member landed in another region" }]),
+    });
+    expect(calls.filter((c) => c.startsWith("apply"))).toEqual(["apply droplets 2"]);
+    expect(calls.filter((c) => c === "observe droplets")).toHaveLength(2);
+    expect(report.stages.find((s) => s.stage === "apply")).toMatchObject({
+      status: "skipped",
+      error: "the plan made again after the droplet changes has errors or failed stages; nothing else applied",
+    });
+    expect(report.diagnostics.map((d) => d.code)).toContain("swarm-region");
+    expect(reportPassed(report)).toBe(false);
+  });
+
+  it("stops after creating droplets when a read fails in the plan made again", async () => {
+    let cfObserves = 0;
+    const f = fakeModules({ droplets: EXISTING });
+    const report = await runEngine({
+      mode: "apply",
+      infraDir: EXAMPLE_DIR,
+      env: {},
+      fetch: noFetch,
+      modules: (ctx) => {
+        const m = f.modules(ctx);
+        const cf = m.providers[0]!;
+        m.providers[0] = {
+          ...cf,
+          module: cf.module,
+          observe: async (d) => {
+            if (++cfObserves === 2) throw new Error("timeout");
+            return cf.observe(d);
+          },
+          diff: cf.diff,
+          apply: cf.apply,
+        };
+        return m;
+      },
+      now: () => new Date("2026-11-19T00:00:00Z"),
+      sleep: async () => {},
+    });
+    expect(f.calls.filter((c) => c.startsWith("apply"))).toEqual(["apply droplets 2"]);
+    expect(report.stages.find((s) => s.stage === "apply")!.error).toMatch(/^the plan made again/);
   });
 
   it("never applies in drift mode, and sends the drift summary to Telegram", async () => {

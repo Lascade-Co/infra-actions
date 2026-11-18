@@ -276,7 +276,7 @@ export function renderPrComment(r: RunReport): string {
   let verdict: string;
   if (!passed) {
     verdict =
-      "❌ **Checks failed. Don't merge this yet:** fix the errors below first. Some of them (a removed droplet file whose droplet still exists, an API that was down) are only caught here, so the apply after a merge would not necessarily stop for them.";
+      "❌ **Checks failed. Don't merge this yet:** fix the errors below first. GitHub won't stop the merge, but the apply after it runs the same checks and writes nothing while any of them fails, so later merges stay stuck until this is fixed.";
   } else if (changes.length) {
     verdict = `✅ **Checks passed.** Merging this applies the ${changes.length} change(s) below to the live accounts.`;
   } else {

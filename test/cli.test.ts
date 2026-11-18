@@ -145,8 +145,9 @@ describe("parseArgs", () => {
       commit: "abcdef1",
     });
     expect(parseArgs(["apply", "infra"])).toEqual({ command: "apply", infraDir: "infra", out: "infra-report.md" });
+    expect(parseArgs(["apply", "infra", "--base", "before"])).toEqual({ command: "apply", infraDir: "infra", out: "infra-report.md", base: "before" });
   });
-  it.each([[[]], [["plan", "x"]], [["check"]], [["check", "a", "b"]], [["check", "a", "--nope", "1"]], [["check", "a", "--out"]], [["apply", "a", "--base", "b"]], [["check", "a", "--commit", "main"]]])(
+  it.each([[[]], [["plan", "x"]], [["check"]], [["check", "a", "b"]], [["check", "a", "--nope", "1"]], [["check", "a", "--out"]], [["drift", "a", "--base", "b"]], [["check", "a", "--commit", "main"]]])(
     "rejects %j",
     (argv) => {
       expect(parseArgs(argv)).toHaveProperty("error");
