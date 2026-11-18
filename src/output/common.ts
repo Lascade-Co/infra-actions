@@ -47,7 +47,10 @@ export const brokenStages = (r: RunReport): StageResult[] => r.stages.filter((s)
 export interface ApplyStop {
   /** The engine's reason. */
   reason: string;
-  /** true: some ops were applied before it stopped (e.g. droplets were created, then re-planning failed). */
+  /**
+   * true: something may have been written before it stopped: ops were applied (e.g. droplets were
+   * created, then re-planning failed), or a module's apply threw part-way (what it wrote is unknown).
+   */
   partial: boolean;
   /** Planned changes that were neither applied nor failed. */
   notApplied: PlanOp[];
@@ -61,9 +64,10 @@ export function applyStopped(r: RunReport): ApplyStop | undefined {
   if (!s) return undefined;
   const done = new Set(r.applied.flatMap((a) => [...a.applied, ...a.failed.map((f) => f.op)]).map(opId));
   const applied = r.applied.reduce((n, a) => n + a.applied.length + a.failed.length, 0);
+  const threw = r.stages.some((x) => x.stage.startsWith("apply ") && x.status === "failed");
   return {
     reason: s.error ?? "apply was skipped",
-    partial: applied > 0,
+    partial: applied > 0 || threw,
     notApplied: allOps(r).filter((op) => op.action !== "report" && !done.has(opId(op))),
   };
 }

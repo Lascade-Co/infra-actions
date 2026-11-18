@@ -57,7 +57,13 @@ From the infra-sync Worker, take the probe rules and target list from `src/healt
   - but it is "not online", so 3 minutes of nothing but timeouts do page (the Worker never paged on timeouts alone);
   - a 429 is an error answer and counts toward the status ≥ 400 window.
 
-  There is deliberately no "inconclusive" criteria that matches timeouts without changing the status: a check that matches another criteria resolves an open auto-resolving incident (OneUptime's `shouldCloseIncident`), so it would resolve and reopen the incident mid-outage, which is more noise, not less. For the same reason, an outage that alternates between error answers and timeouts can drop out of the window for a minute; a first live outage test should confirm it pages once.
+  There is deliberately no "inconclusive" criteria that matches timeouts without changing the status: a check that matches another criteria, or none, resolves an open auto-resolving incident (`MonitorIncident.shouldCloseIncident`), so it would resolve and reopen the incident mid-outage, which is more noise, not less. For the same reason, an outage that alternates between error answers and timeouts can drop out of the window for a minute.
+
+  All of this is read from OneUptime's source (`main`, version 16.0.0, 2026-11-19: `CriteriaFilter.ts`, `EvaluateOverTime.ts`, `APIRequestCriteria.ts`, `MonitorMetricUtil.ts`, which writes a status-code sample only when the check got a status code, `MonitorIncident.ts`, `MonitorStep.ts`), not from a live instance.
+
+**First live run: confirm these.**
+- `requestTimeoutInMs`, `retryCount`, `evaluateOverTime` and `evaluateOverTimeOptions` come back from the list endpoint as written. If the server drops or renames one, every plan shows an update to every monitor forever; fix the field names in `api.ts`.
+- A test outage pages once, after 3 minutes, and recovers once.
 - **Project ids:** the operational status, the offline status and the severity are read from the project (lowest priority, lowest order). A project missing one is an error diagnostic.
 - **Plan and ids:** the plan compares a normalised view of each monitor (`MonitorView`: URL, interval, redirects, criteria as text, on-call ids, status and severity names), never raw JSON. An update carries the existing step, criteria and incident ids so OneUptime keeps their history.
 

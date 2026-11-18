@@ -169,9 +169,10 @@ export const WARNING_GROUPS: ReadonlyArray<{ title: string; codes: readonly stri
     intro: "A record the tool doesn't own still holds these names, so their site isn't routed through the tunnel yet. The cutover swaps each one in place; until then the tool leaves it alone.",
   },
   {
-    title: "Held: not managed this run",
+    title: "Held or skipped: not managed this run",
     codes: ["cloudflare-skipped", "cloudflare-conflict"],
-    intro: "The tool neither changes nor deletes the Cloudflare objects of these droplets or names until the reason below is fixed.",
+    intro:
+      "The tool creates and changes nothing in Cloudflare for these droplets or names until the reason given is fixed, and keeps the objects they have. One exception, as in the Worker: a droplet in a region with no tunnel is skipped, not held, so objects the tool owns for it can be deleted.",
   },
   {
     title: "Tunnel routes not built: add them by hand",
@@ -276,7 +277,7 @@ export function renderPrComment(r: RunReport): string {
   let verdict: string;
   if (!passed) {
     verdict =
-      "❌ **Checks failed. Don't merge this yet:** fix the errors below first. GitHub won't stop the merge, but the apply after it runs the same checks and writes nothing while any of them fails, so later merges stay stuck until this is fixed.";
+      "❌ **Checks failed. Don't merge this yet:** fix the errors below first. GitHub won't stop the merge. The apply after it repeats these checks and writes nothing while one fails, with one gap: a removed droplet file whose droplet still exists is caught only on the merge that removes the file.";
   } else if (changes.length) {
     verdict = `✅ **Checks passed.** Merging this applies the ${changes.length} change(s) below to the live accounts.`;
   } else {

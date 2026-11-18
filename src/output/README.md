@@ -20,7 +20,7 @@ Telegram gets a summary after every apply (also when it was blocked or failed, s
   - errors with `file:line path` (diagnostics carry them);
   - then the ops grouped by droplet, with the global ones (infra app, ssh config) under their own heading. For each op, show its action, kind, key and reason, and a compact `before → after` (use `<details>` for long ones);
   - a separate section for report-only ops: firewall rules (state "not enforced until Phase 5") and frozen droplets. The firewall report is large (broad firewalls attached by tag show on every droplet), so it is one collapsed block holding one collapsed block per droplet, whose summary gives its counts ("3 to allow, 2 to remove");
-  - the Cloudflare warnings people act on, each under its own heading and never cut for size: awaiting cutover (`cloudflare-awaiting-cutover`), held droplets and names (`cloudflare-skipped`, `cloudflare-conflict`) and tunnel routes the tool doesn't build (`cloudflare-route-not-built`). Other warnings follow;
+  - the Cloudflare warnings people act on, each under its own heading and never cut for size: awaiting cutover (`cloudflare-awaiting-cutover`), held or skipped droplets and names (`cloudflare-skipped`, `cloudflare-conflict`) and tunnel routes the tool doesn't build (`cloudflare-route-not-built`). Other warnings follow;
   - the `KNOWN_AFTER_CREATE` values, which show as "known after create";
   - unmanaged droplets;
   - stages that failed or aren't implemented.

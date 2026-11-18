@@ -104,7 +104,7 @@ describe("renderPrComment", () => {
     expect(md).toContain("**Detail truncated:**");
     expect(md).toContain("### ⚠️ Warnings (5)");
     expect(md).toContain("#### Awaiting cutover (1)");
-    expect(md).toContain("#### Held: not managed this run (2)");
+    expect(md).toContain("#### Held or skipped: not managed this run (2)");
     expect(md).toContain("#### Tunnel routes not built: add them by hand (1)");
     expect(md).toContain("#### Other warnings (1)");
     expect(md).toContain("shop.example.com: awaiting cutover");
@@ -135,7 +135,7 @@ describe("renderPrComment", () => {
     r.stages.push({ stage: "plan firewall", status: "not-implemented", error: "firewall.diff is not implemented yet" });
     const md = renderPrComment(r);
     expect(md).toContain("❌ **Checks failed. Don't merge this yet:** fix the errors below first.");
-    expect(md).toContain("the apply after it runs the same checks and writes nothing while any of them fails");
+    expect(md).toContain("The apply after it repeats these checks and writes nothing while one fails");
     const errs = md.indexOf("### ❌ Errors (3)");
     expect(errs).toBeGreaterThan(0);
     expect(errs).toBeLessThan(md.indexOf("### ⚠️ Warnings"));
