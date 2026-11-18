@@ -2,15 +2,7 @@
 
 `infra-actions` holds the code and workflows that keep our infrastructure in step with a private data repo. It replaces the infra-sync Cloudflare Worker: droplet files become the input in place of DigitalOcean tags and `web-config.json`.
 
-**Status:** B0 skeleton. These parts work:
-
-- the file formats (JSON Schemas);
-- the loader;
-- the desired-state model;
-- the plan format;
-- the engine and the CLI.
-
-The modules (Cloudflare, checks, firewall, droplets, OneUptime, ssh config, output) are contracts that throw `NotImplementedError`; see "Modules" below. There are no workflows yet.
+**Status:** phase B done. Every module is built and tested against fakes of the APIs, never against the live accounts. There are no workflows yet (phase C), and no run against the real accounts yet (phase D: the plan against the live account must show zero changes before the tool takes over from the Worker).
 
 ## Two repos
 
@@ -23,12 +15,8 @@ Because this repo is public:
 
 - It contains no real hostnames, IPs, account ids or droplet names.
 - Examples and test fixtures use `example.com`/`example.net`, RFC 5737 addresses (`192.0.2.x`, `198.51.100.x`, `203.0.113.x`), `10.0.0.x` and placeholder UUIDs.
-- The CLI prints one line of counts and PASS/FAIL. Everything with names goes to a file (`--out`), which the workflow posts as a comment on the private `infra` pull request. Plans and reports are never uploaded as artifacts.
-- Secrets come only from environment variables, and are never printed or written to files:
-  - `CF_API_TOKEN`, `DO_TOKEN`;
-  - `INFRA_GH_TOKEN`;
-  - `ONEUPTIME_API_KEY`, `ONEUP_ACCESS_CLIENT_ID`, `ONEUP_ACCESS_CLIENT_SECRET`;
-  - `TELEGRAM_BOT_TOKEN`.
+- The CLI prints one line of counts and PASS/FAIL. Everything with names goes to a file, and only to a path given on the command line (`--out`, `--json`). The workflow posts the `--out` file as a comment on the private `infra` pull request. These files are never uploaded as artifacts, cached or written to the job summary (decision 7).
+- Secrets come only from environment variables (below), and are never printed or written to files.
 
 ## How it works
 
@@ -42,15 +30,57 @@ DigitalOcean droplets ──observe──▶ desired state (files ⨝ droplets, 
          each module: observe ─▶ diff ─▶ plan ops ─▶ (apply only) apply
 ```
 
-- **`check`:** read-only. Validates, checks and plans, and writes the plan to the detail file (the PR comment).
-- **`apply`:**
-  1. Stops before writing anything if the plan has any error.
-  2. Creates droplets and fixes their tags.
-  3. Waits for the new droplets' IPs, then re-plans.
-  4. Applies Cloudflare, firewall (report-only), OneUptime and the ssh config, in that order.
-  5. Sends the Telegram summary, including when apply was blocked or failed.
-- **`drift`:** read-only. Reports droplets with no file, hand-made changes (the plan's ops) and token expiry, and sends the summary to Telegram.
+## Commands
+
+| Command | Reads | Writes | Output |
+|---|---|---|---|
+| `validate <dir>` | the checkout only | nothing | the log line; with `--out`, the detail |
+| `check <dir> [--base <dir>]` | the checkout and every API | nothing | the PR comment (`--out`) |
+| `apply <dir> [--base <dir>]` | the checkout and every API | the live accounts | the apply summary (`--out`) and Telegram |
+| `drift <dir>` | the checkout and every API | nothing | the drift report (`--out`) and Telegram |
+
 - **`validate`:** load and schema only. Needs no secrets and makes no API calls.
+- **`check`:** read-only. Runs the checks, observes every API and plans. Its `--out` file is the PR comment, "What happens when this is merged": counts per provider, errors, warnings (awaiting cutover, held droplets and routes the tool doesn't build each have their own heading), the changes grouped by droplet, then the report-only items (the firewall report collapsed per droplet, frozen droplets). `--base` is a checkout of the PR's base: with it, the check also compares the two (a removed droplet file whose droplet still exists is an error, decision 15).
+- **`apply`:** all-or-nothing (decision 16).
+  1. Runs everything `check` runs. If any check, read or plan has an error, it writes nothing.
+  2. Creates droplets from their profiles and writes their managed tags (create-only: it never resizes, rebuilds or deletes one).
+  3. Waits for the new droplets' IPs, then plans again. The new plan must be as clean as the first, or nothing else is applied.
+  4. Applies Cloudflare, firewall (report-only), OneUptime and the ssh config, in that order. The first module that fails stops the run; the ones after it are skipped and the summary lists them as not applied.
+  5. Sends the Telegram summary, also when apply was blocked or stopped.
+
+  `--base` is the commit `main` was at before the push, so the decision-15 check also stops the apply. It catches a removed file only on the merge that removes it.
+- **`drift`:** read-only, daily. Reports droplets with no file, hand-made changes (the plan's ops) and the GitHub token's expiry, and sends the summary to Telegram.
+
+Options for every command: `--out <file>` (the detail report, markdown), `--json <file>` (the whole report as JSON, including provider ids and the rendered ssh config) and `--commit <sha>` (the `infra` commit the run is pinned to). Nothing is written unless a path is given.
+
+The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops) and 2 for a usage error.
+
+## Environment variables
+
+| Variable | Used by | For |
+|---|---|---|
+| `CF_API_TOKEN` | cloudflare | DNS, tunnels, Access apps, SSH targets |
+| `DO_TOKEN` | droplets, firewall | droplets and tags (write), firewalls (read) |
+| `INFRA_GH_TOKEN` | sshconfig, drift | the ssh-config branch of the `infra` repo; its expiry is in the drift report |
+| `ONEUPTIME_API_KEY` | oneuptime | monitors (when `account.yaml` has a `oneuptime` section) |
+| `ONEUP_ACCESS_CLIENT_ID`, `ONEUP_ACCESS_CLIENT_SECRET` | oneuptime | the Cloudflare Access service token in front of OneUptime |
+| `TELEGRAM_BOT_TOKEN` | apply, drift | the summary to `account.yaml` `telegram.chat_id`; skipped when either is missing |
+
+`validate` needs none. `check`, `apply` and `drift` need all but `TELEGRAM_BOT_TOKEN`; a missing one fails that module's read, and the run fails.
+
+## Modules
+
+| Module | What it manages | Notes |
+|---|---|---|
+| `checks` (B2) | rules beyond the schema: names in an account zone, references between files, service tokens, UDP routes, swarm rules, removed files | pure; errors block check and apply |
+| `droplets` (B4) | creates droplets from profiles; writes the managed tags (`env-*`, `ci-deploy`, `web-staff`, `web-public`) | create-only; other tags never touched |
+| `cloudflare` (B1) | SSH targets and the SSH Access app, private (`vpc-`) names, sites (DNS, tunnel routes, Access apps), `allow.tunnel` routes | port of the Worker's reconcile; delete guard rails; UDP routes and port ranges are reported, not built |
+| `firewall` (B3) | what `allow:` and `swarm:` imply for the DigitalOcean firewalls | report-only until migration Phase 5 |
+| `oneuptime` (B5) | one HTTP monitor per site hostname (or per `monitors:` entry) | down only after 3 failing minutes; owned monitors are never deleted, only reported |
+| `sshconfig` (B6) | the generated ssh config and its README on the `ssh-config` branch | the branch holds nothing else |
+| `output` (B7) | the log line, PR comment, apply summary, drift report and Telegram | |
+
+Each module's own `README.md` describes what it does, its API calls and its diagnostics.
 
 ## The droplet file
 
@@ -139,13 +169,15 @@ npm test                 # vitest
 npm run typecheck        # tsc --noEmit
 npm run build            # -> dist/
 
-node dist/cli.js validate examples/infra --out /tmp/report.md
+node dist/cli.js validate examples/infra
 node dist/cli.js check  <infra-checkout> --out report.md [--json report.json] [--commit <sha>] [--base <base-checkout>]
-node dist/cli.js apply  <infra-checkout> --out report.md
+node dist/cli.js apply  <infra-checkout> --out report.md [--base <checkout-before-the-push>]
 node dist/cli.js drift  <infra-checkout> --out report.md
 ```
 
-The exit code is 0 for pass, 1 for fail (errors, failed or unimplemented stages, failed apply ops) and 2 for a usage error. Without `--out`, details go to `./infra-report.md` (git-ignored).
+Against a real checkout, `check`, `apply` and `drift` call the live APIs with the tokens in the environment, and `apply` writes to them. `test/e2e.test.ts` runs the example checkout through every module against fakes of every API: it applies, then checks that a second apply plans and writes nothing.
+
+Without `--out` nothing is written, and a failed run only says so. The report files hold real names when run against a real checkout: write them outside the checkout (`infra-report*.md` and `infra-plan*.json` are git-ignored as a backstop).
 
 ## Layout
 
@@ -167,15 +199,15 @@ examples/infra/      a fake infra checkout
 test/                vitest; per-module tests go in test/<module>/
 ```
 
-## Modules
+## Writing a module
 
-Each module folder has an `index.ts` (the typed contract) and a `README.md` (what to build, its inputs and outputs, what to port from the Worker).
+Each module folder has an `index.ts` (the typed contract) and a `README.md`.
 
 - **Providers.** Every provider implements `Provider<O>` from `src/core/plan.ts`:
   - `observe()` is read-only;
   - `diff()` is pure and returns a `ModulePlan`;
   - `apply()` performs only its own create/update/delete ops.
-- **Wiring.** Modules are wired in `src/registry.ts`. A module author edits only their own folder and `test/<module>/`.
+- **Wiring.** Modules are wired in `src/registry.ts`.
 
 A plan is a list of ops:
 
@@ -198,7 +230,10 @@ A plan is a list of ops:
 ## Safety rules
 
 - **`check` and `drift` can't write.** Their API clients refuse every non-GET request before it is sent (`ApiClient` with `allowWrites: false`).
-- **Errors block apply.** `apply` writes nothing if any check fails, any read fails or any module isn't implemented.
+- **Apply is all-or-nothing.** `apply` writes nothing if any check fails, any read fails or any plan has an error, and the first module that fails stops the run.
+- **Create-only droplets.** The tool creates droplets but never resizes, rebuilds or deletes one.
+- **Ownership by marker.** The tool changes only objects marked `managed-by:infra-sync`; everything else is left alone. Owned monitors are never deleted.
 - **Firewalls are report-only.** `firewall` ops are always `report` until migration Phase 5, and `applyFirewall` refuses anything else.
+- **Frozen droplets** (`frozen: true`) are planned but never applied.
 - **The loader never follows symlinks.** It reads nothing outside `account.yaml`, `droplets/` and `profiles/`, so a pull request can't make the tool read other files.
 - **Never add real data to this repo.**
