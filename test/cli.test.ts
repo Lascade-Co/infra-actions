@@ -126,6 +126,30 @@ describe("cli", () => {
     expect(detail).not.toContain(SECRETS.DO_TOKEN);
   });
 
+  it("writes no file unless a path is given on the command line (decision 7)", async () => {
+    const { readdir } = await import("node:fs/promises");
+    const cwd = process.cwd();
+    const before = await readdir(cwd);
+    process.chdir(dir);
+    try {
+      const { io: x, stdout, stderr } = io();
+      expect(await main(["check", EXAMPLE_DIR], x)).toBe(0);
+      expect(stdout).toHaveLength(1);
+      expect(stderr).toEqual([]);
+      // A failed run without --out says only that the details were not written.
+      const failing = io({ modules: fakeModules({ droplets: DROPLETS, checkErrors: [{ level: "error", code: "x", message: "bad shop.example.com" }] }).modules });
+      expect(await main(["apply", EXAMPLE_DIR], failing.io)).toBe(1);
+      expect(failing.stderr).toEqual(["infra apply: details not written; pass --out <file> to see them"]);
+      const crashing = io({ modules: () => { throw new Error("boom shop.example.com"); } });
+      expect(await main(["check", EXAMPLE_DIR], crashing.io)).toBe(1);
+      expect(crashing.stderr).toEqual(["infra check: internal error; pass --out <file> to see the details"]);
+      expect(await readdir(dir)).toEqual([]);
+    } finally {
+      process.chdir(cwd);
+    }
+    expect(await readdir(cwd)).toEqual(before);
+  });
+
   it("returns 1 when a stage fails (real registry, no credentials)", async () => {
     const { io: x, stdout } = io({ modules: undefined, env: {} });
     delete x.modules;
@@ -144,8 +168,9 @@ describe("parseArgs", () => {
       base: "base",
       commit: "abcdef1",
     });
-    expect(parseArgs(["apply", "infra"])).toEqual({ command: "apply", infraDir: "infra", out: "infra-report.md" });
-    expect(parseArgs(["apply", "infra", "--base", "before"])).toEqual({ command: "apply", infraDir: "infra", out: "infra-report.md", base: "before" });
+    // No default report path: files are written only where the command line says.
+    expect(parseArgs(["apply", "infra"])).toEqual({ command: "apply", infraDir: "infra" });
+    expect(parseArgs(["apply", "infra", "--base", "before"])).toEqual({ command: "apply", infraDir: "infra", base: "before" });
   });
   it.each([[[]], [["plan", "x"]], [["check"]], [["check", "a", "b"]], [["check", "a", "--nope", "1"]], [["check", "a", "--out"]], [["drift", "a", "--base", "b"]], [["check", "a", "--commit", "main"]]])(
     "rejects %j",

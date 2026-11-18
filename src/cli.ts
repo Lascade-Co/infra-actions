@@ -5,16 +5,29 @@
 //   infra check    <infra-dir> [--base <dir>]  validate, checks, plan; read-only
 //   infra apply    <infra-dir> [--base <dir>]  plan, then apply (the only command that writes);
 //                                           all-or-nothing: any error and nothing is written
-//   --base <dir>: a checkout to compare with (checkChange): the PR's base for check, the commit
-//   main was at before the push for apply.
 //   infra drift    <infra-dir>              read-only: droplets with no file, hand-made changes
 //
-// Options: --out <file> (detail report, markdown; default infra-report.md), --json <file>
-// (the full report as JSON), --commit <sha> (the infra commit this run is pinned to).
+// Options:
+//   --out <file>   the detail report (markdown): the PR comment for check, the apply summary,
+//                  the drift report. Written only when given; there is no default path.
+//   --json <file>  the full report as JSON, including each op's provider ids and the rendered
+//                  ssh config. Written only when given.
+//   --base <dir>   a checkout to compare with (checkChange): the PR's base for check, the commit
+//                  main was at before the push for apply.
+//   --commit <sha> the infra commit this run is pinned to.
+//
+// DETAIL FILES ARE NEVER UPLOADED (decision 7). The --out and --json files hold real names,
+// hostnames, IPs and ids, and the --json file also the provider ids and the ssh config. A
+// workflow must write them outside the checkout (e.g. under $RUNNER_TEMP), post the --out file
+// only as the comment on the private infra pull request (or to Telegram), and never pass either
+// to actions/upload-artifact, a cache, a job summary or the log. Workflow runs of this public
+// repo are visible to the org; artifacts would be too. That is why the CLI writes them only to a
+// path given on the command line and never picks a default location.
 //
 // OUTPUT RULE (this repo is public, so are its Actions logs): stdout gets exactly one line of
 // counts and pass/fail; stderr gets at most a generic message. Names, hostnames, IPs, ids and
 // error text go only to the --out / --json files. Secrets come only from environment variables.
+// Without --out, a failed run says only that the details were not written.
 
 import { realpathSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -31,7 +44,9 @@ type Command = (typeof COMMANDS)[number];
 export interface CliArgs {
   command: Command;
   infraDir: string;
-  out: string;
+  /** Detail report path. Only ever a path given on the command line (see DETAIL FILES above). */
+  out?: string;
+  /** Full JSON report path. Only ever a path given on the command line. */
   json?: string;
   commit?: string;
   base?: string;
@@ -58,7 +73,7 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
   return {
     command: command as Command,
     infraDir: positional[0]!,
-    out: flags.out ?? "infra-report.md",
+    ...(flags.out ? { out: flags.out } : {}),
     ...(flags.json ? { json: flags.json } : {}),
     ...(flags.commit ? { commit: flags.commit } : {}),
     ...(flags.base ? { base: flags.base } : {}),
@@ -96,13 +111,19 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
       ...(io.now ? { now: io.now } : {}),
       ...(io.sleep ? { sleep: io.sleep } : {}),
     });
-    await writeFile(args.out, secrets.redact(renderDetail(report)));
+    if (args.out) await writeFile(args.out, secrets.redact(renderDetail(report)));
     if (args.json) await writeFile(args.json, secrets.redact(JSON.stringify(report, null, 2)) + "\n");
     io.stdout(secrets.redact(renderLogLine(report)));
-    return reportPassed(report) ? 0 : 1;
+    const passed = reportPassed(report);
+    if (!passed && !args.out && !args.json) io.stderr(`infra ${args.command}: details not written; pass --out <file> to see them`);
+    return passed ? 0 : 1;
   } catch (e) {
     // Never print the error itself: it may name droplets or hosts. Put it in the detail file.
     const text = e instanceof Error ? `${e.name}: ${e.message}\n${e.stack ?? ""}` : String(e);
+    if (!args.out) {
+      io.stderr(`infra ${args.command}: internal error; pass --out <file> to see the details`);
+      return 1;
+    }
     try {
       await writeFile(args.out, secrets.redact(`# infra ${args.command}: internal error\n\n\`\`\`\n${text}\n\`\`\`\n`));
       io.stderr(`infra ${args.command}: internal error; details in the --out file`);
