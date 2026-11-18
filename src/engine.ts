@@ -1,6 +1,7 @@
 // The engine: runs validate / check / apply / drift over the modules in the registry.
 //
-//   load -> offline checks -> observe droplets -> desired state -> checks on desired
+//   load -> offline checks -> observe droplets -> desired state -> checks against base (--base)
+//        -> checks on desired
 //        -> plan every module (observe + diff)
 //   apply only: stop if anything failed or any error was found; apply droplets; if droplets
 //        changed, re-observe them and re-plan the rest (new droplets now have IPs); apply each
@@ -120,10 +121,6 @@ export async function runEngine(opts: EngineOptions): Promise<RunReport> {
     if (b.ok && b.value.config) base = b.value.config;
     else if (b.ok) stages.skip("checks against base", "the base checkout does not load");
   }
-  if (base) {
-    const ch = await stages.run("checks against base", () => modules.checks.checkChange(base!, config));
-    if (ch.ok) report.diagnostics.push(...ch.value);
-  }
 
   // 3. Observe the droplets and build the desired state.
   const plans = async (): Promise<{ desired: DesiredState; droplets: Planned; others: Planned[] } | undefined> => {
@@ -161,6 +158,14 @@ export async function runEngine(opts: EngineOptions): Promise<RunReport> {
   //    apply must still reach people.
   const planAndApply = async (): Promise<void> => {
     let state = await plans();
+    // Against the base: needs the observed droplets (a removed file's droplet must be gone,
+    // decision 15). Runs without them when they could not be read; checkChange then fails safe.
+    if (base) {
+      const b = base;
+      const desired = state?.desired;
+      const ch = await stages.run("checks against base", () => modules.checks.checkChange(b, config, desired));
+      if (ch.ok) report.diagnostics.push(...ch.value);
+    }
     if (!state) return;
     report.diagnostics.push(...state.desired.diagnostics);
     const desiredChecks = await stages.run("checks on desired state", () => modules.checks.checkDesired(state!.desired));
