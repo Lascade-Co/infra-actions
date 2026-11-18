@@ -292,3 +292,87 @@ describe("checkChange", () => {
     expect(ds[0]!.message).toContain("from (none) to ubuntu-6");
   });
 });
+
+describe("SSH access (decision 18)", () => {
+  const ACCOUNT = "account.yaml";
+  /** The example account.yaml with its ssh_groups replaced. */
+  const withGroups = async (groups: string): Promise<string> => {
+    const text = (await exampleWith({}))[ACCOUNT]!;
+    const i = text.indexOf("ssh_groups:");
+    expect(i).toBeGreaterThan(0);
+    return `${text.slice(0, i)}ssh_groups:\n${groups}`;
+  };
+  const shop = (ssh: string) => `name: app.example.com\nssh: ${ssh}\n`;
+
+  it("passes groups and emails in the account's domain", async () => {
+    expect(checkConfig(await config({ "droplets/app.example.com.yaml": shop("[admins, shop-team, someone@example.com]") }))).toEqual([]);
+  });
+
+  it("rejects an unknown group, with the file, field and the known groups", async () => {
+    const ds = checkConfig(await config({ "droplets/app.example.com.yaml": shop("[admins, devops]") }));
+    expect(pick(ds)).toEqual([{ level: "error", code: "unknown-ssh-group", file: f("app.example.com"), path: "ssh[1]", droplet: "app.example.com" }]);
+    expect(ds[0]!.message).toBe('SSH group "devops" is not in account.yaml ssh_groups (known: admins, shop-team)');
+  });
+
+  it("rejects an email outside ssh_email_domain in a droplet file (the exact domain, not a suffix)", async () => {
+    const ds = checkConfig(
+      await config({ "droplets/app.example.com.yaml": shop("[someone@example.net, someone@sub.example.com, x@example.com.example.net, ok@example.com]") }),
+    );
+    expect(pick(ds)).toEqual(
+      ["ssh[0]", "ssh[1]", "ssh[2]"].map((path) => ({ level: "error", code: "ssh-email-domain", file: f("app.example.com"), path, droplet: "app.example.com" })),
+    );
+    expect(ds[0]!.message).toBe("someone@example.net is not an @example.com address: only example.com addresses (account.yaml ssh_email_domain) may SSH into droplets");
+  });
+
+  it("rejects an email outside ssh_email_domain in an SSH group, at its place in account.yaml", async () => {
+    const ds = checkConfig(await config({ [ACCOUNT]: await withGroups("  admins: [admin@example.com]\n  shop-team: [dev@example.com, contractor@example.org]\n") }));
+    expect(ds.map(({ level, code, file, path }) => ({ level, code, file, path }))).toEqual([
+      { level: "error", code: "ssh-email-domain", file: ACCOUNT, path: "ssh_groups.shop-team[1]" },
+    ]);
+    expect(ds[0]!.message).toContain("contractor@example.org is not an @example.com address");
+  });
+
+  it("rejects an empty group (schema) and a group name that isn't lowercase", async () => {
+    const r = loadInfraFiles(await exampleWith({ [ACCOUNT]: await withGroups("  admins: [admin@example.com]\n  shop-team: []\n") }));
+    expect(r.config).toBeUndefined();
+    expect(r.diagnostics.map(({ code, file, path, message }) => ({ code, file, path, message }))).toEqual([
+      { code: "schema", file: ACCOUNT, path: "ssh_groups.shop-team", message: "an SSH group must list at least one email" },
+    ]);
+    const bad = loadInfraFiles(await exampleWith({ [ACCOUNT]: await withGroups("  admins: [admin@example.com]\n  shop-team: [dev@example.com]\n  Ops: [ops@example.com]\n") }));
+    expect(bad.diagnostics.map((d) => [d.code, d.file])).toContainEqual(["schema", ACCOUNT]);
+  });
+
+  it("rejects a missing or empty ssh list with the file and field (schema: blocks check and apply)", async () => {
+    const missing = loadInfraFiles(await exampleWith({ "droplets/app.example.com.yaml": "name: app.example.com\n" }));
+    expect(missing.config).toBeUndefined();
+    expect(missing.diagnostics).toEqual([
+      expect.objectContaining({ level: "error", code: "schema", file: f("app.example.com"), droplet: "app.example.com", message: expect.stringMatching(/^missing required key "ssh"/) }),
+    ]);
+    const empty = loadInfraFiles(await exampleWith({ "droplets/app.example.com.yaml": shop("[]") }));
+    expect(empty.diagnostics).toEqual([
+      expect.objectContaining({
+        level: "error",
+        code: "schema",
+        file: f("app.example.com"),
+        path: "ssh",
+        line: 2,
+        message: "ssh must list at least one group or email: every droplet needs someone who can SSH in as ubuntu",
+      }),
+    ]);
+    const odd = loadInfraFiles(await exampleWith({ "droplets/app.example.com.yaml": shop("[Admins, not an email]") }));
+    expect(odd.diagnostics.map((d) => d.path)).toEqual(["ssh[0]", "ssh[1]"]);
+  });
+
+  it("checkConfig also rejects an empty list or group in a config built in code", async () => {
+    const c = await config();
+    c.account.ssh_groups = { ...c.account.ssh_groups, empty: [] };
+    c.droplets[0]!.file.ssh = [];
+    expect(codes(checkConfig(c)).sort()).toEqual(["ssh-group-empty", "ssh-missing"]);
+  });
+
+  it("resolves a droplet's list in the desired state: groups expanded, lowercase, deduplicated, sorted", async () => {
+    const c = await config({ "droplets/app.example.com.yaml": shop("[shop-team, Admin@example.com, admins]") });
+    const d = buildDesired(c, []).droplets.find((x) => x.name === "app.example.com")!;
+    expect(d.sshEmails).toEqual(["admin@example.com", "dev@example.com", "ops@example.com"]);
+  });
+});

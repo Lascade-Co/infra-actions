@@ -12,7 +12,8 @@ These checks are pure functions that return `Diagnostic[]`. They never throw for
 - name = file name;
 - ports, CIDRs and `who` syntax;
 - duplicate or clashing paths and reserved `ssh-`/`vpc-` prefixes;
-- monitor hostnames, a profile's `user_data` file, and account-internal references (CI token names, a tunnel for every env region).
+- monitor hostnames, a profile's `user_data` file, and account-internal references (CI token names, a tunnel for every env region);
+- through the schema: a missing or empty `ssh` list, an `ssh` entry that is neither a group name nor an email, and an empty or badly named group in `ssh_groups`.
 
 ## What B2 must do
 
@@ -29,6 +30,7 @@ These checks are pure functions that return `Diagnostic[]`. They never throw for
 - **Deploy.** `deploy: true` with an empty `ci_deploy_tokens[env]` is a warning (the Worker warns too).
 - **Tunnel UDP.** `allow.tunnel` with `/udp` is only valid with `who: [staff]`. The message gives the reason: service tokens are TCP only, and UDP goes through the client's private-network route.
 - **Swarm.** At least one `role: manager` per cluster. All members agree on `encrypted_overlay`.
+- **SSH access** (decision 18). Each `ssh[i]` that is a group name must be a key of `account.yaml` `ssh_groups`. Each email, in a droplet's `ssh` or in an `ssh_groups` list, must be in `account.yaml` `ssh_email_domain`: the part after `@` must equal it exactly (case-insensitive), so a subdomain or a look-alike suffix fails. Group emails are reported at their place in `account.yaml` (`ssh_groups.<name>[i]`). An empty list or group is rejected again here, for configs built in code.
 
 **`checkDesired(desired)`** runs after the droplets are observed:
 
@@ -59,6 +61,10 @@ Swarm peers need no reference check. Membership is by cluster name, so every pee
 | `unknown-service-token` | error | `allow.tunnel[i].who[j]`, `web.exceptions[i].allow.service_tokens` |
 | `no-deploy-token` | warning | `deploy` |
 | `udp-needs-staff` | error | `allow.tunnel[i].port` |
+| `unknown-ssh-group` | error | `ssh[i]` |
+| `ssh-email-domain` | error | `ssh[i]`, or `ssh_groups.<name>[i]` in `account.yaml` |
+| `ssh-missing` | error | `ssh` (empty list; the schema catches it first in a file) |
+| `ssh-group-empty` | error | `ssh_groups.<name>` in `account.yaml` (the schema catches it first in a file) |
 | `swarm-no-manager` | error | `swarm.role` of every member |
 | `swarm-overlay-mismatch` | error | `swarm.encrypted_overlay` of the minority |
 | `swarm-region` | error | `swarm.cluster` of members outside the main region |

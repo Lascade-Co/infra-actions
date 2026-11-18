@@ -7,7 +7,7 @@ Port the infra-sync Worker's reconcile logic to this tool. The input changes fro
 - **`observeCloudflare(ctx)`** (read-only). Read the account's zones, infrastructure targets and Access apps. Read the configuration of every tunnel in `account.cloudflare.tunnels` and every DNS record of every zone. Return `CloudflareObserved` (`types.ts`). A failed tunnel or zone read becomes `{ error }`, never an exception, so the plan can fail closed. Build the client from `ApiClient` (`src/core/http.ts`) with `CF_API_TOKEN` and `ctx.allowWrites`.
 - **`planCloudflare(desired, observed)`** (pure). Do what the Worker's `buildPlan` + `planWeb` do, emitting `PlanOp`s:
   - **for each droplet with an SSH route:** an infra target, an ssh- Access app, a tunnel ingress rule, the ssh- CNAME and the vpc- A record;
-  - **account-wide:** the infrastructure app;
+  - **account-wide:** one infrastructure app per SSH access set (see "SSH access" below);
   - **for deploy targets:** healthcheck bypass apps;
   - **for sites:** site, admin and exception apps, the route (with 404 rules for protected paths on extra hostnames), the site CNAME, and dependents/implicit hostnames (guard rail 1);
   - **deletes:** stale objects, in the Worker's fail-closed rules.
@@ -33,7 +33,7 @@ Op keys and kinds: see `ResourceKind` in `src/core/plan.ts`. Always set `droplet
 
 ## Port from (in `../infra-sync/` of the audit folder, not in this repo)
 
-`src/plan.ts`, `src/ingress.ts`, `src/dependents.ts`, `src/sync.ts`, `src/clients/cloudflare.ts`, `src/config.ts` (its constants are already in `src/core/constants.ts`: markers, app name prefixes, `INFRA_APP_NAME`, `SSH_USERNAMES`, `HEALTH_BYPASS_PATH`, `VPC_TTL`, `MAX_CNAME_CHAIN` and the web defaults; the admin emails come from `account.cloudflare.ssh_admin_emails`, never from code), and the tests `test/sync.test.ts`, `test/ingress.test.ts`, `test/guardrails.test.ts`, `test/fake.ts`. **Port tests with fake data only** (`example.com`, RFC 5737 IPs, placeholder UUIDs): the Worker's tests and `web-config.json` carry real names and must not be copied into this public repo.
+`src/plan.ts`, `src/ingress.ts`, `src/dependents.ts`, `src/sync.ts`, `src/clients/cloudflare.ts`, `src/config.ts` (its constants are already in `src/core/constants.ts`: markers, app name prefixes, `LEGACY_INFRA_APP_NAME` (the Worker's single app), `HEALTH_BYPASS_PATH`, `VPC_TTL`, `MAX_CNAME_CHAIN` and the web defaults; who may SSH comes from each droplet file's `ssh` list, never from code), and the tests `test/sync.test.ts`, `test/ingress.test.ts`, `test/guardrails.test.ts`, `test/fake.ts`. **Port tests with fake data only** (`example.com`, RFC 5737 IPs, placeholder UUIDs): the Worker's tests and `web-config.json` carry real names and must not be copied into this public repo.
 
 ## Mapping: Worker input → droplet file → desired state
 
@@ -52,7 +52,7 @@ Op keys and kinds: see `ResourceKind` in `src/core/plan.ts`. Always set `droplet
 | `exceptions[{path, allow: "everyone" \| {ips}}]` | `web.exceptions[{path, allow}]` (+ `service_tokens`) | `web.exceptions` (CIDRs normalised: `/32`, sorted, deduplicated) |
 | `health_path` | `web.health_path` | `web.healthPath` (default `/healthcheck/` with deploy, else `/`) |
 | `health_accept_app_404` | `web.health_accept_app_404` | `web.healthAcceptApp404` |
-| `SSH_ADMIN_EMAILS` | `account.cloudflare.ssh_admin_emails` | `desired.account…` |
+| `SSH_ADMIN_EMAILS` (every droplet, ubuntu and root) | `ssh` per droplet: groups from `account.yaml` `ssh_groups`, emails in `ssh_email_domain` (ubuntu only; decision 18) | `sshEmails` (groups expanded, lowercase, sorted) |
 | `STAFF_POLICY_ID`, `TEAM_DOMAIN`, `CF_ACCOUNT_ID` | `account.cloudflare.staff_policy_id`, `team_domain`, `account_id` | same |
 | `MAX_DELETES`, `MAX_DELETE_FRACTION` | `account.cloudflare.guards` | same |
 | `ALLOW_MASS_DELETE`, `DRY_RUN` | none: check is the dry run; apply is the merge | n/a |
@@ -73,3 +73,18 @@ Op keys and kinds: see `ResourceKind` in `src/core/plan.ts`. Always set `droplet
 - **Severity:** read failures and breaking dependents are errors. Conflicts, skipped droplets, Worker warnings, "awaiting cutover", a route that lost its Access app (`cloudflare-repair`: an error would block the apply that repairs it) and a guard-rail trip (`cloudflare-guard`: the deletes become `report` ops, creates and updates still apply) are warnings.
 - **allow.tunnel:** a TCP port becomes an Access app `infra-sync: tunnel <route>` (Service Auth for the named tokens, then the reusable staff policy), the rule `tcp://<private ip>:<port>` in the region's tunnel and a proxied CNAME with the marker. The prefix keeps the Worker-era rules from taking these apps for ssh- apps. `/udp` and port ranges are shown as `report` ops with a `cloudflare-route-not-built` warning: the private-network route for UDP is not built by the tool. A route hostname is never deleted while any file declares it.
 - **Not expressible, so not ported:** a droplet whose file drops `web:` loses the hold the Worker kept on the extra hostnames listed in `web-config.json` for it; their objects become stale (see the phase D export notes above).
+
+## SSH access (decision 18)
+
+This is the one intended difference from the Worker in the phase D parity plan: root is removed and each droplet gets its own list.
+
+- **Access sets.** A droplet's `sshEmails` (its `ssh` list resolved in `core/desired.ts`) is its access set. The set id is the first 12 hex digits of the SHA-256 of the sorted emails (`sshAccessSetId`), so droplets with the same people share a set, however their lists are written.
+- **Targets.** Each target carries `managed-by: infra-sync` (ownership, unchanged) and `ssh-access: <set id>`. Tags the tool doesn't manage are kept. A target whose tags differ is updated in place.
+- **Apps.** There is one infrastructure app per set: `infra-sync: SSH <set id>`. Its `target_criteria` is port 22/SSH for the tag `ssh-access: <set id>`. It has one Allow policy, `infra-sync: ssh-access`, for the set's emails with `connection_rules.ssh.usernames: ["ubuntu"]`. Each droplet's `ssh-` route app lets in the same emails. Its policy keeps the Worker's name `infra-sync: ssh-admins`, so a droplet whose list equals the Worker's admins shows no change there.
+- **Ownership.** Every infrastructure app named `infra-sync: SSH …` is the tool's, including the Worker's `infra-sync: SSH targets`. An owned app that no set wants is deleted, as is a duplicate.
+- **Never leave a droplet without an app.** The plan keeps an unwanted app, as a `report` op with a `cloudflare-warning`, while any owned target that remains after the apply has no wanted set's tag and the app selects it. That covers a frozen droplet (its retag is report-only), a droplet with no file, and a held droplet. The deletes count toward the guard rails. With deletions blocked, nothing is deleted.
+- **Order** (`ops.ts` `PHASE`):
+  1. The set apps are created or updated (phase `infraApp`, before every target).
+  2. Targets are created or retagged. Each waits for its set's app op (`ids.deps`), so a failed app create leaves its droplets on their current app.
+  3. The unwanted apps are deleted last (`infraAppDelete`), after every app and target op of the run succeeded.
+- **PR comment.** An `infra-target` op whose change alters who may SSH carries `sshAccess: {before, after}` (emails and usernames, never sent to the API). "Before" is what the owned apps select now. "After" is the wanted apps plus the unwanted ones that stay. `src/output` turns it into the droplet's "SSH access" line (who gains, who loses) and one note when root login goes away.

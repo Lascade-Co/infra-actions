@@ -318,7 +318,8 @@ function toAccount(raw: RawAccount, ctx: FileCtx): AccountConfig {
     ssh_groups: Object.fromEntries(
       Object.entries(raw.ssh_groups ?? {})
         .sort(([a], [b]) => a.localeCompare(b))
-        .map(([name, emails]) => [name, [...new Set(emails.map((e) => e.toLowerCase()))].sort()]),
+        // Lowercased, in file order (so a check can point at ssh_groups.<name>[i]); desired.ts deduplicates and sorts.
+        .map(([name, emails]) => [name, emails.map((e) => e.toLowerCase())]),
     ),
   };
 }

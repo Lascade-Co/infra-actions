@@ -1,9 +1,10 @@
 // Apply in the Worker's fail-closed order (src/sync.ts there), from the ops alone.
 //
+//   SSH access set apps first (decision 18), so a retagged target always finds its set's app
 //   creates/updates per hostname: target -> Access app -> tunnel route -> DNS
 //   sites: exception apps, then gating apps -> route (only once every gating app is in place) -> CNAME
 //   deletes per hostname: DNS -> route -> Access app -> target, stopping at the first failure
-//   then vpc- records, healthcheck bypass apps, the infrastructure app
+//   then vpc- records, healthcheck bypass apps, and last the infrastructure apps no set wants
 //
 // An op runs only when every op it depends on (ids.deps) that is in this apply succeeded. Each
 // tunnel configuration is read fresh, changed and written back as one document; a route op whose

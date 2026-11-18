@@ -280,3 +280,54 @@ describe("renderDetail", () => {
     expect(renderDetail(cleanReport("validate")).startsWith("# infra validate")).toBe(true);
   });
 });
+
+describe("SSH access lines (decision 18)", () => {
+  const target = (droplet: string, before: { emails: string[]; usernames: string[] }, after: { emails: string[]; usernames: string[] }): PlanOp =>
+    op({ kind: "infra-target", key: droplet, action: "update", before: { tags: {} }, after: { tags: {} }, reason: "the droplet's SSH access set changed", droplet, sshAccess: { before, after } });
+  const ROOT_UBUNTU = ["root", "ubuntu"];
+
+  it("leads each droplet's group with who gains and loses SSH, and calls out root removal once", () => {
+    const r = checkReport();
+    r.plans = [
+      {
+        module: "cloudflare",
+        ops: [
+          target("shop.example.com", { emails: ["a@example.com", "b@example.com"], usernames: ROOT_UBUNTU }, { emails: ["a@example.com", "c@example.com"], usernames: ["ubuntu"] }),
+          target("db.example.com", { emails: ["a@example.com"], usernames: ROOT_UBUNTU }, { emails: ["a@example.com"], usernames: ["ubuntu"] }),
+          target("new.example.com", { emails: [], usernames: [] }, { emails: ["a@example.com"], usernames: ["ubuntu"] }),
+          op({ kind: "infra-app", key: "infra-sync: SSH targets", action: "delete", before: { policies: [{ connection_rules: { ssh: { usernames: ROOT_UBUNTU } } }] }, after: null, reason: "the Worker's single SSH app" }),
+        ],
+        unchanged: 0,
+        diagnostics: [],
+      },
+    ];
+    const md = renderPrComment(r);
+    const shop = md.slice(md.indexOf("#### `shop.example.com`"));
+    expect(shop.split("\n")[2]).toBe("- **SSH access:** gains c@​example.com; loses b@​example.com, as `ubuntu`");
+    expect(md).toContain("- **SSH access:** the same people, as `ubuntu`");
+    expect(md).toContain("- **SSH access:** gains a@​example.com, as `ubuntu`");
+    expect(count(md, "Root SSH login is removed")).toBe(1);
+    expect(md).toContain("**Root SSH login is removed on 2 droplet(s).** SSH through Cloudflare is only as `ubuntu` from now on; root only through the DigitalOcean web console.");
+  });
+
+  it("says when nobody is left, and has no root note when root was never allowed", () => {
+    const r = checkReport();
+    r.plans = [{ module: "cloudflare", ops: [target("shop.example.com", { emails: ["a@example.com"], usernames: ["ubuntu"] }, { emails: [], usernames: [] })], unchanged: 0, diagnostics: [] }];
+    const md = renderPrComment(r);
+    expect(md).toContain("- **SSH access:** loses a@​example.com: nobody can SSH in through Cloudflare");
+    expect(md).not.toContain("Root SSH login");
+  });
+
+  it("calls out root removal when only the Worker's app is deleted", () => {
+    const r = checkReport();
+    r.plans = [
+      {
+        module: "cloudflare",
+        ops: [op({ kind: "infra-app", key: "infra-sync: SSH targets", action: "delete", before: { policies: [{ connection_rules: { ssh: { usernames: ROOT_UBUNTU } } }] }, after: null, reason: "x" })],
+        unchanged: 0,
+        diagnostics: [],
+      },
+    ];
+    expect(renderPrComment(r)).toContain("**Root SSH login is removed.**");
+  });
+});

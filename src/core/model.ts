@@ -67,7 +67,7 @@ export interface AccountConfig {
   };
   /** The only email domain allowed in droplet ssh lists and in ssh_groups (lowercase, e.g. example.com). */
   ssh_email_domain: string;
-  /** SSH groups a droplet's ssh list may name: name -> emails (lowercase, deduplicated, sorted). {} when the file has none. */
+  /** SSH groups a droplet's ssh list may name: name -> emails (lowercase, in file order). {} when the file has none. */
   ssh_groups: Record<string, string[]>;
   ssh_config: {
     /** First comment line of the generated file, e.g. "Example Co droplets". Keeps org names out of this repo. */
