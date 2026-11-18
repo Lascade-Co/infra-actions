@@ -1,0 +1,8 @@
+node_modules/
+dist/
+coverage/
+*.log
+.DS_Store
+# Detail reports written by the CLI (--out); they can hold real names when run against a real checkout.
+infra-report*.md
+infra-plan*.json
