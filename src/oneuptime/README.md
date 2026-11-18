@@ -44,12 +44,20 @@ From the infra-sync Worker, take the probe rules and target list from `src/healt
 | Update | `PUT /api/monitor/<id>` with body `{ data }`, never with `monitorType` (OneUptime can't change it) |
 
 **A monitor.**
-- **Fields:** a `Website` monitor named `<hostname><path>`, every minute (`* * * * *`), one step: `GET https://<hostname><path>` without following redirects (as the Worker's `redirect: "manual"`). Its description is `managed-by:infra-sync <key> (droplets/<file>; edits made here are overwritten)`.
+- **Fields:** a `Website` monitor named `<hostname><path>`, every minute (`* * * * *`), one step: `GET https://<hostname><path>` without following redirects (as the Worker's `redirect: "manual"`), a 10 s request timeout (`requestTimeoutInMs`) and 2 retries within the check (`retryCount`, as the Worker's re-probe of a failed check). Its description is `managed-by:infra-sync <key> (droplets/<file>; edits made here are overwritten)`.
 - **Ownership and identity:** the description's first word is the marker (so a description starting `managed-by:infra-sync2` is not the tool's), and its second word is the key, so a monitor renamed by hand keeps its identity. When that word isn't shaped like `<hostname><path>`, or the description is only the marker, the monitor's name is the key.
 - **Criteria,** judged in order, where the first match decides:
   1. *(only with `acceptApp404`)* `infra-sync: app 404 counts as up`. All of: online, status 404, and the body does not contain `error code: 1`. That body filter matches nothing on an empty body, so the tunnel's empty 404 still fails.
-  2. `infra-sync: offline`. Any of: not online, status ≥ 400, status < 200. It sets the project's offline status and opens an auto-resolving incident at the most severe incident severity, paging `on_call_policy_ids`.
+  2. `infra-sync: offline`. Any of: not online, status ≥ 400, status < 200, **each judged over the last 3 minutes** (`evaluateOverTime`, `All Values`, 3 minutes). It sets the project's offline status and opens an auto-resolving incident at the most severe incident severity, paging `on_call_policy_ids`.
   3. `infra-sync: online`. All of: online, status 200–399. It sets the operational status.
+- **Paging noise (owner, 2026-11-19).** A site is marked offline, and paged, only after **3 failing minutes in a row**, as the Worker's `FAILS_TO_ALERT`. OneUptime's per-step `retryCount` only retries inside one check, so the 3 minutes come from "evaluate over time" on each offline filter: `All Values` fires only when every check of the window matched and the checks cover the whole window, so a new monitor or one bad minute never pages. Recovery (`online`, `app 404`) is judged on the latest check, so it is immediate. In the minutes before the window fills, no criteria matches and the monitor takes the default (operational) status.
+- **Timeouts.** The Worker counted a timeout, a network error or a 429 as inconclusive (neither a failure nor a reset). OneUptime has no such outcome, so as close as it allows:
+  - each check retries twice (10 s each) before it counts, so one slow answer is not a failed minute;
+  - a check with no answer records no status code, so the status-code windows skip it, as the Worker did;
+  - but it is "not online", so 3 minutes of nothing but timeouts do page (the Worker never paged on timeouts alone);
+  - a 429 is an error answer and counts toward the status ≥ 400 window.
+
+  There is deliberately no "inconclusive" criteria that matches timeouts without changing the status: a check that matches another criteria resolves an open auto-resolving incident (OneUptime's `shouldCloseIncident`), so it would resolve and reopen the incident mid-outage, which is more noise, not less. For the same reason, an outage that alternates between error answers and timeouts can drop out of the window for a minute; a first live outage test should confirm it pages once.
 - **Project ids:** the operational status, the offline status and the severity are read from the project (lowest priority, lowest order). A project missing one is an error diagnostic.
 - **Plan and ids:** the plan compares a normalised view of each monitor (`MonitorView`: URL, interval, redirects, criteria as text, on-call ids, status and severity names), never raw JSON. An update carries the existing step, criteria and incident ids so OneUptime keeps their history.
 

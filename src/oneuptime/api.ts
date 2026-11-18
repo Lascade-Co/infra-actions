@@ -23,6 +23,22 @@
 //     (DatabaseService), so `data` carries no projectId.
 //   - "Response Body" filters support only Contains / Not Contains, and match nothing when the body
 //     is empty (Server/Utils/Monitor/Criteria/APIRequestCriteria.ts).
+//   - A criteria filter can be judged over a window: `evaluateOverTime: true` with
+//     `evaluateOverTimeOptions { timeValueInMinutes, evaluateOverTimeType: "All Values" }`
+//     (Common/Types/Monitor/CriteriaFilter.ts). "Is Online" and "Response Status Code" are recorded
+//     series on Website monitors, so both may be windowed. "All Values" fires only when every sample
+//     in the window matches AND the samples reach both edges of the window (EvaluateOverTime.ts
+//     isWindowCovered), so a new monitor or a single bad check never satisfies it. A check that got
+//     no answer (timeout) records no status code: the status-code window skips it (it neither counts
+//     nor resets), and the status-code filter is not judged on that check.
+//   - A step's `requestTimeoutInMs` (default and cap 60000) and `retryCount` (retries after the
+//     first attempt; default and cap 3) apply to Website monitors: the probe retries a failing check
+//     within the same run before recording it (MonitorStep.ts, Probe WebsiteMonitor.ts).
+//   - Ungrouped monitors stop at the first matching criteria. When a check matches a different
+//     criteria than the one that opened an incident, or none (the monitor then takes the default
+//     status), an auto-resolving incident is resolved (MonitorIncident.ts shouldCloseIncident). So
+//     the tool adds no "inconclusive" criteria for timeouts: matching one would resolve an open
+//     incident mid-outage and page twice more.
 
 import { ApiClient, type FetchFn } from "../core/http.js";
 import type { Json } from "../core/plan.js";
@@ -101,6 +117,12 @@ const arr = (v: unknown): unknown[] => {
   const u = unwrap(v);
   return Array.isArray(u) ? u : [];
 };
+/** A number, also when sent as a string (the dashboard saves some numbers as strings). */
+const num = (v: unknown): number | null => {
+  const u = unwrap(v);
+  const n = typeof u === "number" ? u : typeof u === "string" && u.trim() !== "" ? Number(u) : NaN;
+  return Number.isFinite(n) ? n : null;
+};
 
 export const rowId = (r: Record<string, unknown>): string | undefined => str(r["_id"]) ?? str(r["id"]);
 
@@ -153,6 +175,19 @@ export function readSeverity(r: Record<string, unknown>): SeverityRef | undefine
 export const MONITOR_TYPE = "Website";
 /** Every minute (CronTime.EVERY_MINUTE; the fastest a probe can do). */
 export const MONITORING_INTERVAL = "* * * * *";
+/**
+ * Paging noise (as the Worker's FAILS_TO_ALERT): a site is marked offline, and the incident opens,
+ * only when every check of the last DOWN_AFTER_MINUTES minutes failed. Recovery is immediate.
+ */
+export const DOWN_AFTER_MINUTES = 3;
+/** As the Worker's probe: give up on one attempt after this long (its PROBE_TIMEOUT_MS was 8 s). */
+export const REQUEST_TIMEOUT_MS = 10000;
+/**
+ * As the Worker's re-probe of a failed check (RETRY_DELAY_MS): retries after the first attempt
+ * within one check, so one dropped request or timeout doesn't count as a failed minute.
+ * 3 attempts x REQUEST_TIMEOUT_MS stays inside the one-minute interval.
+ */
+export const RETRY_COUNT = 2;
 /** Criteria names: they identify the tool's criteria on an update (their ids are carried over). */
 export const CRITERION = {
   app404: "infra-sync: app 404 counts as up",
@@ -188,6 +223,13 @@ export interface PartIds {
 
 const filter = (checkOn: string, filterType: string, value?: number | string): Json =>
   value === undefined ? { checkOn, filterType } : { checkOn, filterType, value };
+
+/** A filter that matches only when every check of the last DOWN_AFTER_MINUTES minutes matched. */
+const sustained = (checkOn: string, filterType: string, value?: number | string): Json => ({
+  ...(filter(checkOn, filterType, value) as Record<string, Json>),
+  evaluateOverTime: true,
+  evaluateOverTimeOptions: { timeValueInMinutes: DOWN_AFTER_MINUTES, evaluateOverTimeType: "All Values" },
+});
 
 /** The `data` of a create (with monitorType) or update (without: it can't change). */
 export function monitorData(want: MonitorWant, project: ProjectIds, ids: PartIds, newId: () => string, forCreate: boolean): Record<string, Json> {
@@ -229,12 +271,19 @@ export function monitorData(want: MonitorWant, project: ProjectIds, ids: PartIds
     criterion(
       "offline",
       "Any",
-      [filter("Is Online", "False"), filter("Response Status Code", "Greater Than Or Equal To", 400), filter("Response Status Code", "Less Than", 200)],
+      // Each filter is judged over its own window: down after DOWN_AFTER_MINUTES minutes of no
+      // answer, or of error answers. Timeouts count as "not online" (OneUptime has no
+      // "inconclusive"), but the status-code window skips them, as the Worker did.
+      [
+        sustained("Is Online", "False"),
+        sustained("Response Status Code", "Greater Than Or Equal To", 400),
+        sustained("Response Status Code", "Less Than", 200),
+      ],
       project.offlineStatusId,
       {
         id: ids.incident ?? newId(),
         title: `${want.name} is down`,
-        description: `${want.url} did not answer with 2xx/3xx${want.acceptApp404 ? " or the app's own 404" : ""}.`,
+        description: `${want.url} did not answer with 2xx/3xx${want.acceptApp404 ? " or the app's own 404" : ""} for ${DOWN_AFTER_MINUTES} minutes.`,
         incidentSeverityId: project.incidentSeverityId,
         autoResolveIncident: true,
         onCallPolicyIds: [...want.onCallPolicyIds],
@@ -259,6 +308,8 @@ export function monitorData(want: MonitorWant, project: ProjectIds, ids: PartIds
             requestType: "GET",
             // As the Worker's probe (redirect: "manual"): a 3xx, such as the staff login's 302, is up.
             doNotFollowRedirects: true,
+            requestTimeoutInMs: REQUEST_TIMEOUT_MS,
+            retryCount: RETRY_COUNT,
             monitorCriteria: { _type: "MonitorCriteria", value: { monitorCriteriaInstanceArray: criteria } },
           },
         },
@@ -290,6 +341,9 @@ export type MonitorView = {
   url: string;
   method: string;
   followRedirects: boolean;
+  /** null when the API returns none (OneUptime's defaults then apply: 60 s, 3 retries). */
+  requestTimeoutMs: number | null;
+  retryCount: number | null;
   acceptApp404: boolean;
   onCallPolicyIds: string[];
   defaultStatus: string;
@@ -308,7 +362,10 @@ function criterionText(c: Record<string, unknown>, names: Names): string {
   const filters = arr(c["filters"]).map((f) => {
     const o = obj(f);
     const v = str(o["value"]);
-    return `${str(o["checkOn"]) ?? "?"} ${str(o["filterType"]) ?? "?"}${v !== undefined && v !== "" ? ` ${v}` : ""}`;
+    const base = `${str(o["checkOn"]) ?? "?"} ${str(o["filterType"]) ?? "?"}${v !== undefined && v !== "" ? ` ${v}` : ""}`;
+    if (o["evaluateOverTime"] !== true) return base;
+    const opts = obj(o["evaluateOverTimeOptions"]);
+    return `${base} (${str(opts["evaluateOverTimeType"]) ?? "?"} over ${str(opts["timeValueInMinutes"]) ?? "?"} min)`;
   });
   const parts = [`${str(c["name"]) ?? ""} [${str(c["filterCondition"]) ?? "?"}]: ${filters.join("; ")}`];
   parts.push(c["changeMonitorStatus"] === true ? `status ${named(names.statuses, str(c["monitorStatusId"]))}` : "no status change");
@@ -346,6 +403,8 @@ export function monitorView(row: Record<string, unknown>, names: Names): Monitor
     url: str(step["monitorDestination"]) ?? "",
     method: str(step["requestType"]) ?? "GET",
     followRedirects: step["doNotFollowRedirects"] !== true,
+    requestTimeoutMs: num(step["requestTimeoutInMs"]),
+    retryCount: num(step["retryCount"]),
     acceptApp404: criteria.some((c) => str(c["name"]) === CRITERION.app404),
     onCallPolicyIds: [...policies].sort(),
     defaultStatus: named(names.statuses, str(obj(row["monitorSteps"])["defaultMonitorStatusId"])),

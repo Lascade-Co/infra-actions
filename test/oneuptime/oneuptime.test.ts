@@ -199,12 +199,14 @@ describe("oneuptime plan", () => {
       url: "https://shop.example.com/healthcheck/",
       method: "GET",
       followRedirects: false,
+      requestTimeoutMs: 10000,
+      retryCount: 2,
       acceptApp404: false,
       onCallPolicyIds: [POLICY_ID],
       defaultStatus: "Operational",
       steps: 1,
       criteria: [
-        `${CRITERION.offline} [Any]: Is Online False; Response Status Code Greater Than Or Equal To 400; Response Status Code Less Than 200 -> status Offline -> incident "shop.example.com/healthcheck/ is down" (Critical Incident, auto-resolve, on-call ${POLICY_ID})`,
+        `${CRITERION.offline} [Any]: Is Online False (All Values over 3 min); Response Status Code Greater Than Or Equal To 400 (All Values over 3 min); Response Status Code Less Than 200 (All Values over 3 min) -> status Offline -> incident "shop.example.com/healthcheck/ is down" (Critical Incident, auto-resolve, on-call ${POLICY_ID})`,
         `${CRITERION.online} [All]: Is Online True; Response Status Code Greater Than Or Equal To 200; Response Status Code Less Than 400 -> status Operational`,
       ],
     });
@@ -410,6 +412,49 @@ describe("oneuptime apply", () => {
     expect(offline.value).toMatchObject({ monitorStatusId: STATUS_OFFLINE, createIncidents: true, createAlerts: false });
     expect(offline.value.incidents[0]).toMatchObject({ incidentSeverityId: SEVERITY_CRITICAL, onCallPolicyIds: [POLICY_ID], autoResolveIncident: true });
     expect(online.value).toMatchObject({ monitorStatusId: STATUS_OPERATIONAL, createIncidents: false });
+  });
+
+  it("marks a site down only after 3 failing minutes, retries within a check, and recovers at once", async () => {
+    const d = await desired();
+    const plan = planMonitors(d, await observeMonitors(ctxFor(d, fake)));
+    const tools = plan.ops.findIndex((o) => o.key === "tools.example.net/api/health");
+    await applyMonitors(ctxFor(d, fake, "apply"), [plan.ops[0]!, plan.ops[tools]!], newId);
+    const posts = fake.calls.filter((c) => c.method === "POST" && c.path === "/api/monitor");
+    expect(posts).toHaveLength(2);
+    for (const post of posts) {
+      const step = post.body.data.monitorSteps.value.monitorStepsInstanceArray[0].value;
+      expect(step).toMatchObject({ requestTimeoutInMs: 10000, retryCount: 2 });
+      const criteria = step.monitorCriteria.value.monitorCriteriaInstanceArray.map((c: any) => c.value);
+      const offline = criteria.find((c: any) => c.name === CRITERION.offline);
+      expect(offline.filterCondition).toBe("Any");
+      expect(offline.filters).toHaveLength(3);
+      for (const f of offline.filters) {
+        expect(f).toMatchObject({ evaluateOverTime: true, evaluateOverTimeOptions: { timeValueInMinutes: 3, evaluateOverTimeType: "All Values" } });
+      }
+      // Recovery (and the app's own 404) are judged on the latest check alone.
+      for (const c of criteria.filter((c: any) => c.name !== CRITERION.offline)) {
+        for (const f of c.filters) expect(f.evaluateOverTime).toBeUndefined();
+      }
+    }
+  });
+
+  it("updates a monitor made before the 3-minute window (no window, OneUptime's default retries)", async () => {
+    const d = await desired();
+    const strip = (v: any): any => {
+      if (Array.isArray(v)) return v.map(strip);
+      if (v && typeof v === "object") {
+        const out: Record<string, any> = {};
+        for (const [k, x] of Object.entries(v)) if (!["evaluateOverTime", "evaluateOverTimeOptions", "retryCount", "requestTimeoutInMs"].includes(k)) out[k] = strip(x);
+        return out;
+      }
+      return v;
+    };
+    fake.monitors.push(strip(ownedRow(d, "shop.example.com/healthcheck/")));
+    const plan = planMonitors(d, await observeMonitors(ctxFor(d, fake)));
+    const up = plan.ops.find((o) => o.key === "shop.example.com/healthcheck/")!;
+    expect(up.action).toBe("update");
+    expect(up.reason).toBe("requestTimeoutMs, retryCount, criteria differ from droplets/shop.example.com.yaml");
+    expect((up.before as { requestTimeoutMs: unknown }).requestTimeoutMs).toBeNull();
   });
 
   it("refuses to write in a read-only run", async () => {
