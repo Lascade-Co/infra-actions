@@ -1,12 +1,17 @@
 // B7: everything people read. See README.md in this folder.
 //
-// Implemented in B0 (the CLI needs them now): renderLogLine (counts only: the one thing
-// that goes to the public logs), renderBasicDetail (plain fallback detail file).
-// To do in B7: renderPrComment, renderApplySummary, renderTelegram, renderDriftReport, sendTelegram.
+// renderLogLine (counts only: the one thing that goes to the public logs) and
+// renderBasicDetail (plain fallback detail file) are here; the B7 renderers are in
+// markdown.ts (PR comment, apply summary, drift report) and telegram.ts.
 
-import { formatDiagnostic, NotImplementedError, notImplemented } from "../core/diagnostics.js";
-import type { PlanOp, RunContext } from "../core/plan.js";
+import { formatDiagnostic, NotImplementedError } from "../core/diagnostics.js";
+import type { PlanOp } from "../core/plan.js";
 import { reportCounts, reportPassed, type RunReport } from "../core/report.js";
+import { renderApplySummary, renderDriftReport, renderPrComment } from "./markdown.js";
+
+export { PR_COMMENT_MARKER, PR_COMMENT_MAX, renderApplySummary, renderDriftReport, renderPrComment } from "./markdown.js";
+export { EXPIRY_WARN_DAYS } from "./common.js";
+export { MESSAGE_MAX, packMessages, renderTelegram, sendTelegram, stripHtml } from "./telegram.js";
 
 /**
  * The single line printed to stdout. Counts and pass/fail ONLY: no names, hostnames, IPs,
@@ -62,31 +67,6 @@ export function renderBasicDetail(r: RunReport): string {
   if (r.unmanaged.length) out.push("", "## Droplets with no file", "", ...r.unmanaged.map((d) => `- ${d.name} (${d.region}, id ${d.id})`));
   if (r.credentials.length) out.push("", "## Credentials", "", ...r.credentials.map((x) => `- ${x.name}: expires ${x.expiresAt ?? "unknown"}`));
   return out.join("\n") + "\n";
-}
-
-/** B7. The PR comment for `check`: "what happens if this is merged", counts first, then detail grouped by droplet. */
-export function renderPrComment(_r: RunReport): string {
-  return notImplemented("output.renderPrComment");
-}
-
-/** B7. The detail file after `apply`: what was done, what failed, what was skipped (frozen, report-only). */
-export function renderApplySummary(_r: RunReport): string {
-  return notImplemented("output.renderApplySummary");
-}
-
-/** B7. The daily drift report: droplets with no file, hand-made changes (the plan's ops), credential expiry. */
-export function renderDriftReport(_r: RunReport): string {
-  return notImplemented("output.renderDriftReport");
-}
-
-/** B7. Telegram messages (HTML, each under 4096 chars) summarising an apply or a drift run. */
-export function renderTelegram(_r: RunReport): string[] {
-  return notImplemented("output.renderTelegram");
-}
-
-/** B7. Sends the messages to account.telegram.chat_id with TELEGRAM_BOT_TOKEN (ctx.fetch). */
-export async function sendTelegram(_ctx: RunContext, _messages: string[]): Promise<void> {
-  return notImplemented("output.sendTelegram");
 }
 
 /** The detail file for a run: B7's renderer for the mode, or renderBasicDetail until it exists. */
