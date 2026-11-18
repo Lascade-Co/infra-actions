@@ -1,0 +1,128 @@
+# Applies infra's main: the only workflow that writes to the live accounts.
+#
+# Started by infra's dispatch-apply workflow on every push to main (repository_dispatch
+# infra-apply, payload sha and before) or by an admin by hand. Runs this repo's main only, one
+# apply at a time, never cancelled. The commit must be on infra's main. The tool is
+# all-or-nothing and sends the Telegram summary itself.
+#
+# Decision 7: the log shows counts and pass/fail only. The report stays in $RUNNER_TEMP (outside
+# the workspace), is never uploaded, cached or put in the job summary, and is deleted at the end.
+name: apply
+
+on:
+  repository_dispatch:
+    types: [infra-apply]
+  workflow_dispatch:
+    inputs:
+      sha:
+        description: the infra main commit to apply (40 hex)
+        required: true
+        type: string
+      before:
+        description: the commit main was at before that push (40 hex); empty for no base
+        required: false
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-apply
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Validate inputs
+        id: in
+        env:
+          SHA: ${{ github.event.client_payload.sha || inputs.sha }}
+          BEFORE: ${{ github.event.client_payload.before || inputs.before }}
+        run: |
+          [[ "$SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::sha must be 40 lowercase hex characters"; exit 1; }
+          # A push that creates main (the first push) has before = 40 zeros: there is no base.
+          if [ -z "$BEFORE" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+            BEFORE=""
+          elif ! [[ "$BEFORE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::before must be 40 lowercase hex characters or empty"; exit 1
+          fi
+          { echo "sha=$SHA"; echo "before=$BEFORE"; } >> "$GITHUB_OUTPUT"
+          if [ -n "$BEFORE" ]; then echo "Applying infra $SHA (base $BEFORE)."; else echo "Applying infra $SHA (no base)."; fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Build
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: The commit must be on infra's main
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          SHA: ${{ steps.in.outputs.sha }}
+        run: |
+          # compare <sha>...main: "identical" or "ahead" means main contains the commit.
+          status=$(gh api "repos/Lascade-Co/infra/compare/$SHA...main" --jq .status)
+          case "$status" in
+            identical | ahead) echo "The commit is on infra's main ($status)." ;;
+            *) echo "::error::The commit is not on infra's main ($status); nothing applied."; exit 1 ;;
+          esac
+
+      - name: Fetch the commit
+        env:
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          SHA: ${{ steps.in.outputs.sha }}
+        run: .github/scripts/fetch-infra.sh "$RUNNER_TEMP/infra-head" "$SHA" "$SHA"
+
+      - name: Fetch the base
+        if: ${{ steps.in.outputs.before != '' }}
+        env:
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          BEFORE: ${{ steps.in.outputs.before }}
+        run: .github/scripts/fetch-infra.sh "$RUNNER_TEMP/infra-base" "$BEFORE" "$BEFORE"
+
+      # No secrets here: if the checkout doesn't load or fails the schema, the apply step below
+      # never starts, so no token reaches the tool and no API is called.
+      - name: Validate (no secrets, no API calls)
+        env:
+          SHA: ${{ steps.in.outputs.sha }}
+        run: |
+          rc=0
+          node dist/cli.js validate "$RUNNER_TEMP/infra-head" --commit "$SHA" --out "$RUNNER_TEMP/infra-validate.md" || rc=$?
+          if [ "$rc" != 0 ]; then
+            echo "::error::The infra checkout does not load or fails the schema. Apply not run: no API was called and nothing was written."
+            exit 1
+          fi
+
+      - name: Apply
+        id: apply
+        env:
+          SHA: ${{ steps.in.outputs.sha }}
+          HAS_BASE: ${{ steps.in.outputs.before != '' }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          ONEUPTIME_API_KEY: ${{ secrets.ONEUPTIME_API_KEY }}
+          ONEUP_ACCESS_CLIENT_ID: ${{ secrets.ONEUP_ACCESS_CLIENT_ID }}
+          ONEUP_ACCESS_CLIENT_SECRET: ${{ secrets.ONEUP_ACCESS_CLIENT_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: |
+          base=()
+          if [ "$HAS_BASE" = true ]; then base=(--base "$RUNNER_TEMP/infra-base"); fi
+          node dist/cli.js apply "$RUNNER_TEMP/infra-head" "${base[@]}" \
+            --commit "$SHA" --out "$RUNNER_TEMP/infra-report.md"
+
+      - name: Remove the checkouts and the reports
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/infra-head" "$RUNNER_TEMP/infra-base" "$RUNNER_TEMP/infra-report.md" "$RUNNER_TEMP/infra-validate.md"

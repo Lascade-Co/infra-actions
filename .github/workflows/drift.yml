@@ -1,0 +1,70 @@
+# Daily drift report, read-only: droplets with no file, hand-made changes, the GitHub token's
+# expiry. The tool sends the summary to Telegram; the log shows counts and pass/fail only.
+name: drift
+
+on:
+  schedule:
+    - cron: "30 3 * * *" # 03:30 UTC, 09:00 IST
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: infra-drift
+  cancel-in-progress: false
+
+jobs:
+  drift:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Build
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Fetch infra's main
+        id: head
+        env:
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+        run: |
+          .github/scripts/fetch-infra.sh "$RUNNER_TEMP/infra-head" refs/heads/main
+          echo "sha=$(git -C "$RUNNER_TEMP/infra-head" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+
+      - name: Validate (no secrets, no API calls)
+        env:
+          SHA: ${{ steps.head.outputs.sha }}
+        run: |
+          rc=0
+          node dist/cli.js validate "$RUNNER_TEMP/infra-head" --commit "$SHA" --out "$RUNNER_TEMP/infra-validate.md" || rc=$?
+          if [ "$rc" != 0 ]; then
+            echo "::error::The infra checkout does not load or fails the schema. Drift not run: no API was called."
+            exit 1
+          fi
+
+      - name: Drift
+        env:
+          SHA: ${{ steps.head.outputs.sha }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          ONEUPTIME_API_KEY: ${{ secrets.ONEUPTIME_API_KEY }}
+          ONEUP_ACCESS_CLIENT_ID: ${{ secrets.ONEUP_ACCESS_CLIENT_ID }}
+          ONEUP_ACCESS_CLIENT_SECRET: ${{ secrets.ONEUP_ACCESS_CLIENT_SECRET }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+        run: node dist/cli.js drift "$RUNNER_TEMP/infra-head" --commit "$SHA" --out "$RUNNER_TEMP/infra-report.md"
+
+      - name: Remove the checkout and the reports
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/infra-head" "$RUNNER_TEMP/infra-report.md" "$RUNNER_TEMP/infra-validate.md"

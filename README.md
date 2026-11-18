@@ -2,7 +2,7 @@
 
 `infra-actions` holds the code and workflows that keep our infrastructure in step with a private data repo. It replaces the infra-sync Cloudflare Worker: droplet files become the input in place of DigitalOcean tags and `web-config.json`.
 
-**Status:** phase B done. Every module is built and tested against fakes of the APIs, never against the live accounts. There are no workflows yet (phase C), and no run against the real accounts yet (phase D: the plan against the live account must show zero changes before the tool takes over from the Worker).
+**Status:** phase B done and the workflows are in place (B8). Every module is built and tested against fakes of the APIs, never against the live accounts. There has been no run against the real accounts yet (phase D: the plan against the live account must show zero changes before the tool takes over from the Worker).
 
 ## Two repos
 
@@ -158,6 +158,24 @@ Only `name` is required. A minimal adopted droplet is just `name: build.example.
   It holds no secrets.
 
 See [`examples/infra/`](examples/infra/) for a complete fake checkout.
+
+## Workflows
+
+| Workflow | Starts on | Does |
+|---|---|---|
+| `test.yml` | push, pull request | `npm ci`, typecheck, tests. No secrets. |
+| `check.yml` | `repository_dispatch` `infra-check` (`pr`, `head_sha`, `base_sha`) from infra's `dispatch-check`, or by hand | fetches the PR head (`refs/pull/<pr>/head`, must equal `head_sha`) and the base, runs `check --base`, posts or updates the one plan comment (`<!-- infra-actions:plan -->`) on the infra PR, and sets the commit status `infra-actions/check` |
+| `apply.yml` | `repository_dispatch` `infra-apply` (`sha`, `before`) from infra's `dispatch-apply`, or by hand | the commit must be on infra's `main`; `validate` without secrets, then `apply --base <before>`. One concurrency group `infra-apply`, never cancelled. Telegram summary from the tool. |
+| `drift.yml` | daily 03:30 UTC, or by hand | `validate` without secrets, then `drift` on infra's `main`. Telegram summary from the tool. |
+
+Rules kept by all of them (decision 7):
+
+- Only this repo's `main` runs check, apply and drift; every run is pinned to the dispatched `infra` commit.
+- Inputs are validated (PR number, 40-hex shas) and reach scripts only through `env:`.
+- Actions are pinned by commit SHA.
+- Secrets are passed only to the steps that need them.
+- Reports go to `$RUNNER_TEMP` and are deleted at the end. They are never uploaded as artifacts, cached or written to the job summary.
+- `infra` is fetched with a quiet `git fetch` (`.github/scripts/fetch-infra.sh`), not `actions/checkout`, whose log would show infra commit subjects.
 
 ## Run it locally
 

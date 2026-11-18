@@ -1,0 +1,149 @@
+# Checks an infra pull request, read-only, and posts the plan as one comment on it.
+#
+# Started by infra's dispatch-check workflow (repository_dispatch infra-check, payload pr,
+# head_sha, base_sha) or by an admin by hand with the same inputs. Runs this repo's main only.
+# Never calls apply: the tool's check mode refuses every write before it is sent.
+#
+# Decision 7: the log shows counts and pass/fail only. The report goes only to $RUNNER_TEMP
+# (outside the workspace) and to the private infra pull request; never to an artifact, a cache
+# or the job summary.
+name: check
+
+on:
+  repository_dispatch:
+    types: [infra-check]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: infra pull request number
+        required: true
+        type: string
+      head_sha:
+        description: the pull request's head commit (40 hex)
+        required: true
+        type: string
+      base_sha:
+        description: the pull request's base commit (40 hex)
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  # A newer push to the same pull request supersedes the running check (check is read-only).
+  group: infra-check-${{ github.event.client_payload.pr || inputs.pr }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Validate inputs
+        id: in
+        env:
+          PR: ${{ github.event.client_payload.pr || inputs.pr }}
+          HEAD_SHA: ${{ github.event.client_payload.head_sha || inputs.head_sha }}
+          BASE_SHA: ${{ github.event.client_payload.base_sha || inputs.base_sha }}
+        run: |
+          [[ "$PR" =~ ^[1-9][0-9]{0,8}$ ]] || { echo "::error::pr must be a pull request number"; exit 1; }
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::head_sha must be 40 lowercase hex characters"; exit 1; }
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "::error::base_sha must be 40 lowercase hex characters"; exit 1; }
+          {
+            echo "pr=$PR"
+            echo "head_sha=$HEAD_SHA"
+            echo "base_sha=$BASE_SHA"
+          } >> "$GITHUB_OUTPUT"
+          echo "Checking infra pull request #$PR at $HEAD_SHA against $BASE_SHA."
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          package-manager-cache: false
+
+      - name: Build
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Commit status (pending)
+        env:
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          HEAD_SHA: ${{ steps.in.outputs.head_sha }}
+        run: .github/scripts/commit-status.sh "$HEAD_SHA" pending "Planning"
+
+      - name: Fetch the pull request's head
+        id: head
+        env:
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          PR: ${{ steps.in.outputs.pr }}
+          HEAD_SHA: ${{ steps.in.outputs.head_sha }}
+        run: |
+          rc=0
+          .github/scripts/fetch-infra.sh "$RUNNER_TEMP/infra-head" "refs/pull/$PR/head" "$HEAD_SHA" || rc=$?
+          if [ "$rc" = 3 ]; then
+            echo "moved=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::The pull request's head is no longer $HEAD_SHA; the newer commit gets its own check."
+          fi
+          exit "$rc"
+
+      - name: Fetch the pull request's base
+        env:
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          BASE_SHA: ${{ steps.in.outputs.base_sha }}
+        run: .github/scripts/fetch-infra.sh "$RUNNER_TEMP/infra-base" "$BASE_SHA" "$BASE_SHA"
+
+      - name: Check
+        id: check
+        env:
+          HEAD_SHA: ${{ steps.in.outputs.head_sha }}
+          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
+          DO_TOKEN: ${{ secrets.DO_TOKEN }}
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          ONEUPTIME_API_KEY: ${{ secrets.ONEUPTIME_API_KEY }}
+          ONEUP_ACCESS_CLIENT_ID: ${{ secrets.ONEUP_ACCESS_CLIENT_ID }}
+          ONEUP_ACCESS_CLIENT_SECRET: ${{ secrets.ONEUP_ACCESS_CLIENT_SECRET }}
+        run: |
+          rc=0
+          node dist/cli.js check "$RUNNER_TEMP/infra-head" --base "$RUNNER_TEMP/infra-base" \
+            --commit "$HEAD_SHA" --out "$RUNNER_TEMP/infra-report.md" || rc=$?
+          echo "exit=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Plan comment
+        id: comment
+        if: ${{ !cancelled() && steps.in.outcome == 'success' && steps.head.outputs.moved != 'true' }}
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          PR: ${{ steps.in.outputs.pr }}
+          HEAD_SHA: ${{ steps.in.outputs.head_sha }}
+        run: .github/scripts/pr-comment.sh "$PR" "$RUNNER_TEMP/infra-report.md" "$HEAD_SHA"
+
+      - name: Commit status (result)
+        if: ${{ !cancelled() && steps.in.outcome == 'success' && steps.head.outputs.moved != 'true' }}
+        env:
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          HEAD_SHA: ${{ steps.in.outputs.head_sha }}
+          EXIT: ${{ steps.check.outputs.exit }}
+        run: |
+          case "$EXIT" in
+            0) .github/scripts/commit-status.sh "$HEAD_SHA" success "Checks passed: the plan is in the PR comment" ;;
+            1) .github/scripts/commit-status.sh "$HEAD_SHA" failure "Checks failed: see the PR comment" ;;
+            *) .github/scripts/commit-status.sh "$HEAD_SHA" error "The check did not finish" ;;
+          esac
+
+      - name: Result
+        if: ${{ steps.check.outcome == 'success' }}
+        env:
+          EXIT: ${{ steps.check.outputs.exit }}
+        run: |
+          if [ "$EXIT" = 0 ]; then echo "check: PASS"; else echo "check: FAIL (the details are in the PR comment)"; exit 1; fi
+
+      - name: Remove the checkouts and the report
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/infra-head" "$RUNNER_TEMP/infra-base" "$RUNNER_TEMP/infra-report.md"
