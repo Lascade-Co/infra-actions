@@ -206,8 +206,8 @@ describe("oneuptime plan", () => {
       defaultStatus: "Operational",
       steps: 1,
       criteria: [
-        `${CRITERION.offline} [Any]: Is Online False (All Values over 3 min); Response Status Code Greater Than Or Equal To 400 (All Values over 3 min); Response Status Code Less Than 200 (All Values over 3 min) -> status Offline -> incident "shop.example.com/healthcheck/ is down" (Critical Incident, auto-resolve, on-call ${POLICY_ID})`,
         `${CRITERION.online} [All]: Is Online True; Response Status Code Greater Than Or Equal To 200; Response Status Code Less Than 400 -> status Operational`,
+        `${CRITERION.offline} [Any]: Is Online False (All Values over 3 min); Response Status Code Greater Than Or Equal To 400 (All Values over 3 min); Response Status Code Less Than 200 (All Values over 3 min) -> status Offline -> incident "shop.example.com/healthcheck/ is down" (Critical Incident, auto-resolve, on-call ${POLICY_ID})`,
       ],
     });
     expect(plan.unchanged).toBe(0);
@@ -221,7 +221,8 @@ describe("oneuptime plan", () => {
     expect(tools.criteria[0]).toBe(
       `${CRITERION.app404} [All]: Is Online True; Response Status Code Equal To 404; Response Body Not Contains error code: 1 -> status Operational`,
     );
-    expect(tools.criteria[1]).toMatch(new RegExp(`^${CRITERION.offline}`));
+    expect(tools.criteria[1]).toMatch(new RegExp(`^${CRITERION.online}`));
+    expect(tools.criteria[2]).toMatch(new RegExp(`^${CRITERION.offline}`));
   });
 
   it("warns when a monitor can only see the staff login", async () => {
@@ -288,9 +289,9 @@ describe("oneuptime plan", () => {
       incidentSeverityId: SEVERITY_CRITICAL,
       monitorId: ids(900),
       stepId: step.id,
-      incidentId: crit[0].incidents[0].id,
-      "criterion.offline": crit[0].id,
-      "criterion.online": crit[1].id,
+      incidentId: crit[1].incidents[0].id,
+      "criterion.offline": crit[1].id,
+      "criterion.online": crit[0].id,
     });
 
     const res = await applyMonitors(ctxFor(d, fake, "apply"), [up], newId);
@@ -313,7 +314,7 @@ describe("oneuptime plan", () => {
     await applyMonitors(ctxFor(d, fake, "apply"), [up], newId);
     const sent = fake.calls.find((c) => c.method === "PUT")!.body.data.monitorSteps.value.monitorStepsInstanceArray[0].value;
     const names = sent.monitorCriteria.value.monitorCriteriaInstanceArray.map((c: any) => c.value.name);
-    expect(names).toEqual([CRITERION.app404, CRITERION.offline, CRITERION.online]);
+    expect(names).toEqual([CRITERION.app404, CRITERION.online, CRITERION.offline]);
   });
 
   it("reports owned monitors no file wants, duplicates and a wrong type; never deletes; ignores foreign ones", async () => {
@@ -408,7 +409,8 @@ describe("oneuptime apply", () => {
     expect(step._type).toBe("MonitorStep");
     expect(step.value).toMatchObject({ requestType: "GET", doNotFollowRedirects: true, monitorDestination: { _type: "URL", value: "https://shop.example.com/healthcheck/" } });
     expect(step.value.id).toMatch(/^[0-9a-f-]{36}$/);
-    const [offline, online] = step.value.monitorCriteria.value.monitorCriteriaInstanceArray;
+    // Healthy is judged first, so a check that is healthy now is never marked down.
+    const [online, offline] = step.value.monitorCriteria.value.monitorCriteriaInstanceArray;
     expect(offline.value).toMatchObject({ monitorStatusId: STATUS_OFFLINE, createIncidents: true, createAlerts: false });
     expect(offline.value.incidents[0]).toMatchObject({ incidentSeverityId: SEVERITY_CRITICAL, onCallPolicyIds: [POLICY_ID], autoResolveIncident: true });
     expect(online.value).toMatchObject({ monitorStatusId: STATUS_OPERATIONAL, createIncidents: false });

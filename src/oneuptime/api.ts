@@ -252,7 +252,7 @@ export function monitorData(want: MonitorWant, project: ProjectIds, ids: PartIds
   });
   const criteria: Json[] = [];
   if (want.acceptApp404) {
-    // Before "offline", whose status >= 400 would match first: criteria are judged in order.
+    // First: "offline", which comes later, would match its 404 (criteria are judged in order).
     criteria.push(
       criterion(
         "app404",
@@ -267,7 +267,16 @@ export function monitorData(want: MonitorWant, project: ProjectIds, ids: PartIds
       ),
     );
   }
+  // Healthy before offline: criteria are judged in order and the first match decides, and offline
+  // is judged from its stored windows. So a check that is healthy now is never marked down,
+  // whether or not the server has stored it in the window yet; recovery is immediate.
   criteria.push(
+    criterion(
+      "online",
+      "All",
+      [filter("Is Online", "True"), filter("Response Status Code", "Greater Than Or Equal To", 200), filter("Response Status Code", "Less Than", 400)],
+      project.operationalStatusId,
+    ),
     criterion(
       "offline",
       "Any",
@@ -288,12 +297,6 @@ export function monitorData(want: MonitorWant, project: ProjectIds, ids: PartIds
         autoResolveIncident: true,
         onCallPolicyIds: [...want.onCallPolicyIds],
       },
-    ),
-    criterion(
-      "online",
-      "All",
-      [filter("Is Online", "True"), filter("Response Status Code", "Greater Than Or Equal To", 200), filter("Response Status Code", "Less Than", 400)],
-      project.operationalStatusId,
     ),
   );
   const monitorSteps: Json = {

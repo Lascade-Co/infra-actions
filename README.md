@@ -229,7 +229,7 @@ A plan is a list of ops:
 
 ## Safety rules
 
-- **`check` and `drift` can't write.** Their API clients refuse every non-GET request before it is sent (`ApiClient` with `allowWrites: false`).
+- **`check` and `drift` can't write.** Their API clients refuse every write before it is sent (`ApiClient` with `allowWrites: false`). The only non-GET requests they allow are OneUptime's list endpoints, which are POST reads marked `read: true`.
 - **Apply is all-or-nothing.** `apply` writes nothing if any check fails, any read fails or any plan has an error, and the first module that fails stops the run.
 - **Create-only droplets.** The tool creates droplets but never resizes, rebuilds or deletes one.
 - **Ownership by marker.** The tool changes only objects marked `managed-by:infra-sync`; everything else is left alone. Owned monitors are never deleted.
