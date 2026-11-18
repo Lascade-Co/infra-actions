@@ -72,12 +72,6 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
-      - name: Commit status (pending)
-        env:
-          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
-          HEAD_SHA: ${{ steps.in.outputs.head_sha }}
-        run: .github/scripts/commit-status.sh "$HEAD_SHA" pending "Planning"
-
       - name: Fetch the pull request's head
         id: head
         env:
@@ -92,6 +86,12 @@ jobs:
             echo "::warning::The pull request's head is no longer $HEAD_SHA; the newer commit gets its own check."
           fi
           exit "$rc"
+
+      - name: Commit status (pending; only once the head is verified)
+        env:
+          INFRA_GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          HEAD_SHA: ${{ steps.in.outputs.head_sha }}
+        run: .github/scripts/commit-status.sh "$HEAD_SHA" pending "Planning"
 
       - name: Fetch the pull request's base
         env:
