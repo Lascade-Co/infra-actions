@@ -211,6 +211,22 @@ describe("frozen and new droplets", () => {
     expect(f.targets.some((t) => t.hostname === "staging.esim.example.com")).toBe(true);
   });
 
+  it("a hostname removed from a frozen droplet's file keeps its objects (attributed by its route's IP)", async () => {
+    const f = new FakeCloudflare();
+    f.droplets = [droplet(12, "shop.example.com", "nyc1", "10.0.0.31", ["env-prod", "web-public"])];
+    f.sites["shop.example.com"] = { hostnames: ["shop.example.net"] };
+    await run(f);
+    expect(f.dns[Z_NET]!.some((r) => r.name === "shop.example.net")).toBe(true);
+    f.sites["shop.example.com"] = { hostnames: [] };
+    f.frozen.add("shop.example.com");
+    const r = await run(f);
+    const stale = r.plan.ops.filter((o) => o.key.includes("shop.example.net"));
+    expect(stale.length).toBeGreaterThanOrEqual(2);
+    expect(stale.every((o) => o.droplet === "shop.example.com" && o.action === "report")).toBe(true);
+    expect(f.dns[Z_NET]!.some((x) => x.name === "shop.example.net")).toBe(true);
+    expect(f.tunnels[T_NYC1]!.config!.ingress!.some((x) => x.hostname === "shop.example.net")).toBe(true);
+  });
+
   it("a droplet about to be created gets pending ops with placeholders; apply leaves them for the re-plan", async () => {
     const f = new FakeCloudflare();
     f.toCreate["new.example.com"] = { env: "prod", tags: ["web-staff"] };

@@ -96,13 +96,26 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
   }
   const routeOwner = new Map<string, string>();
   for (const d of desired.droplets) for (const t of d.spec.allow.tunnel) routeOwner.set(lc(t.route), d.name);
+  // A hostname no file lists any more (e.g. removed from a frozen droplet's web.hostnames): the
+  // droplet whose private IP its current route points at.
+  const byIp = new Map<string, string>();
+  for (const d of desired.droplets) if (d.privateIpv4) byIp.set(d.privateIpv4, d.name);
+  const ownerByRoute = (h: string): string | undefined => {
+    for (const tc of Object.values(snap.tunnels)) {
+      if (isErr(tc)) continue;
+      const main = rulesFor(tc.config, h).find((r) => !r.path);
+      const ip = main ? /^[a-z]+:\/\/([^:/]+)/i.exec(main.service)?.[1] : undefined;
+      if (ip && byIp.has(ip)) return byIp.get(ip);
+    }
+    return undefined;
+  };
   const ownerOfName = (name: string): string | undefined => {
     const n = lc(name);
     if (fileNames.has(n)) return n;
     if (byGenerated.has(n)) return byGenerated.get(n);
     if (routeOwner.has(n)) return routeOwner.get(n);
     const o = plan.ownerOf(n);
-    return fileNames.has(o) ? o : undefined;
+    return fileNames.has(o) ? o : ownerByRoute(n);
   };
 
   const add = (d: Omit<Draft, "op"> & { op: Omit<PlanOp, "provider" | "module"> }, pending = false) => {
