@@ -124,16 +124,39 @@ describe("engine: apply", () => {
     expect(report.applied).toEqual([]);
   });
 
+  it("still sends the Telegram summary when apply is blocked", async () => {
+    const { report, telegram } = await run(
+      "apply",
+      { checkErrors: [{ level: "error", code: "x", message: "bad reference" }] },
+      { TELEGRAM_BOT_TOKEN: "x-telegram-token" },
+    );
+    expect(report.applied).toEqual([]);
+    expect(telegram).toEqual([["summary"]]);
+    expect(report.stages.at(-1)).toEqual({ stage: "notify telegram", status: "ok" });
+  });
+
+  it("still sends the Telegram summary when the droplets can't be read", async () => {
+    const { telegram } = await run("apply", { failObserve: { droplets: new Error("timeout") } }, { TELEGRAM_BOT_TOKEN: "x-telegram-token" });
+    expect(telegram).toEqual([["summary"]]);
+  });
+
   it("applies nothing when any stage failed", async () => {
     const { calls } = await run("apply", { failObserve: { cloudflare: new Error("timeout") } });
     expect(calls.filter((c) => c.startsWith("apply"))).toEqual([]);
   });
 
-  it("never applies in drift mode", async () => {
-    const { report, calls, contexts } = await run("drift");
+  it("never applies in drift mode, and sends the drift summary to Telegram", async () => {
+    const { report, calls, contexts, telegram } = await run("drift", {}, { TELEGRAM_BOT_TOKEN: "x-telegram-token" });
     expect(contexts[0]!.allowWrites).toBe(false);
     expect(calls.filter((c) => c.startsWith("apply"))).toEqual([]);
     expect(report.unmanaged).toHaveLength(1);
+    expect(telegram).toEqual([["summary"]]);
+  });
+
+  it("never sends Telegram for check (its output is the PR comment)", async () => {
+    const { telegram, report } = await run("check", {}, { TELEGRAM_BOT_TOKEN: "x-telegram-token" });
+    expect(telegram).toEqual([]);
+    expect(report.stages.some((s) => s.stage === "notify telegram")).toBe(false);
   });
 });
 

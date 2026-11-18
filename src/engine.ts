@@ -4,7 +4,8 @@
 //        -> plan every module (observe + diff)
 //   apply only: stop if anything failed or any error was found; apply droplets; if droplets
 //        changed, re-observe them and re-plan the rest (new droplets now have IPs); apply each
-//        module's changes in registry order; notify Telegram.
+//        module's changes in registry order.
+//   apply and drift: always end with the Telegram summary (also when apply was blocked).
 //
 // Each stage is recorded in the report (ok / failed / not-implemented / skipped). Error text
 // is redacted of secret values and only ever reaches the detail file.
@@ -155,58 +156,64 @@ export async function runEngine(opts: EngineOptions): Promise<RunReport> {
     report.credentials = all.flatMap((p) => (p.provider.credentials && p.observed !== undefined ? p.provider.credentials(p.observed) : []));
   };
 
-  let state = await plans();
-  if (!state) return finish();
-  report.diagnostics.push(...state.desired.diagnostics);
-  const desiredChecks = await stages.run("checks on desired state", () => modules.checks.checkDesired(state!.desired));
-  if (desiredChecks.ok) report.diagnostics.push(...desiredChecks.value);
-  record(state.desired, [state.droplets, ...state.others]);
+  // 4. Plan (all modes), then apply (apply mode only). Every apply outcome, and every drift run,
+  //    ends in the Telegram summary: an apply has no PR to comment on, so a blocked or failed
+  //    apply must still reach people.
+  const planAndApply = async (): Promise<void> => {
+    let state = await plans();
+    if (!state) return;
+    report.diagnostics.push(...state.desired.diagnostics);
+    const desiredChecks = await stages.run("checks on desired state", () => modules.checks.checkDesired(state!.desired));
+    if (desiredChecks.ok) report.diagnostics.push(...desiredChecks.value);
+    record(state.desired, [state.droplets, ...state.others]);
 
-  if (mode !== "apply") return finish();
+    if (mode !== "apply") return;
 
-  // 4. Apply. Nothing is written unless the whole plan is clean.
-  if (!reportPassed(report) || hasErrors(report.diagnostics)) {
-    stages.skip("apply", "the plan has errors or failed stages; nothing applied");
-    return finish();
-  }
-
-  const applyOne = async (p: Planned) => {
-    if (!p.plan) {
-      stages.skip(`apply ${p.provider.module}`, "no plan");
+    // Nothing is written unless the whole plan is clean.
+    if (!reportPassed(report) || hasErrors(report.diagnostics)) {
+      stages.skip("apply", "the plan has errors or failed stages; nothing applied");
       return;
     }
-    const ready = p.plan.ops.filter((op) => isChange(op) && !op.pending);
-    const notReady: PlanOp[] = p.plan.ops.filter((op) => isChange(op) && op.pending);
-    const res = await stages.run(`apply ${p.provider.module}`, () => p.provider.apply(ready, p.observed));
-    if (res.ok) {
-      res.value.skipped.push(...notReady.map((op) => ({ op, reason: "waiting for a droplet that isn't up yet" })));
-      report.applied.push(res.value);
+
+    const applyOne = async (p: Planned) => {
+      if (!p.plan) {
+        stages.skip(`apply ${p.provider.module}`, "no plan");
+        return;
+      }
+      const ready = p.plan.ops.filter((op) => isChange(op) && !op.pending);
+      const notReady: PlanOp[] = p.plan.ops.filter((op) => isChange(op) && op.pending);
+      const res = await stages.run(`apply ${p.provider.module}`, () => p.provider.apply(ready, p.observed));
+      if (res.ok) {
+        res.value.skipped.push(...notReady.map((op) => ({ op, reason: "waiting for a droplet that isn't up yet" })));
+        report.applied.push(res.value);
+      }
+    };
+
+    const dropletChanges = state.droplets.plan?.ops.filter(isChange).length ?? 0;
+    await applyOne(state.droplets);
+    if (dropletChanges > 0) {
+      // New droplets now have IPs, tags changed: plan everything again before applying the rest.
+      const again = await plans();
+      if (!again) {
+        stages.skip("apply", "re-planning after droplet changes failed; nothing else applied");
+        return;
+      }
+      state = again;
+      record(state.desired, [state.droplets, ...state.others]);
     }
+    for (const p of state.others) await applyOne(p);
   };
+  await planAndApply();
 
-  const dropletChanges = state.droplets.plan?.ops.filter(isChange).length ?? 0;
-  await applyOne(state.droplets);
-  if (dropletChanges > 0) {
-    // New droplets now have IPs, tags changed: plan everything again before applying the rest.
-    const again = await plans();
-    if (!again) {
-      stages.skip("apply", "re-planning after droplet changes failed; nothing else applied");
-      return finish();
+  // 5. Telegram summary (apply and drift; check results go to the PR comment instead).
+  if (mode !== "check") {
+    if (config.account.telegram && secrets.has("TELEGRAM_BOT_TOKEN")) {
+      await stages.run("notify telegram", async () => {
+        await modules.notifier.sendTelegram(ctx, modules.notifier.renderTelegram(report));
+      });
+    } else {
+      stages.skip("notify telegram", "no telegram chat in account.yaml or no TELEGRAM_BOT_TOKEN");
     }
-    state = again;
-    const appliedSoFar = report.applied;
-    record(state.desired, [state.droplets, ...state.others]);
-    report.applied = appliedSoFar;
-  }
-  for (const p of state.others) await applyOne(p);
-
-  // 5. Telegram summary.
-  if (config.account.telegram && secrets.has("TELEGRAM_BOT_TOKEN")) {
-    await stages.run("notify telegram", async () => {
-      await modules.notifier.sendTelegram(ctx, modules.notifier.renderTelegram(report));
-    });
-  } else {
-    stages.skip("notify telegram", "no telegram chat in account.yaml or no TELEGRAM_BOT_TOKEN");
   }
   return finish();
 }

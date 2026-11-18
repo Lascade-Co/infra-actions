@@ -6,6 +6,7 @@ OneUptime handles ongoing health (decision 3). The tool creates each site's moni
 
 - **`observeMonitors(ctx)`:** list the project's monitors (`account.oneuptime.url`, `project_id`).
   - **Access:** OneUptime sits behind the staff login, so every request carries the Access service-token headers (`CF-Access-Client-Id: ONEUP_ACCESS_CLIENT_ID`, `CF-Access-Client-Secret: ONEUP_ACCESS_CLIENT_SECRET`) as well as the API key (`ONEUPTIME_API_KEY`, in the header OneUptime documents).
+  - **Read-only runs:** if OneUptime's list or query endpoints are POST, call them with `ApiClient.request(..., { read: true })`. Never do that for an endpoint that changes anything.
   - **Ownership:** a monitor is the tool's when its description starts with `managed-by:infra-sync` (`DNS_COMMENT_MARKER`). Count the others; never return or touch them.
 - **`planMonitors(desired, observed)`** (pure):
   - **One HTTP monitor per entry in `DesiredDroplet.monitors`.** Defaults are already applied: with no `monitors:` key, every site hostname gets one at `web.healthPath`. Its key is `"<hostname><path>"`.

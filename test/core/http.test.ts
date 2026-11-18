@@ -18,6 +18,12 @@ describe("ApiClient", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("allows a non-GET call marked as a read (POST query endpoints) in a read-only run", async () => {
+    const { c, fetch } = client(false, () => new Response(JSON.stringify({ data: [] })));
+    expect(await c.request("POST", "/monitor/get-list", { body: { query: {} }, read: true })).toEqual({ data: [] });
+    expect(fetch.mock.calls[0]![1]).toMatchObject({ method: "POST" });
+  });
+
   it("reads with query parameters and the auth header", async () => {
     const { c, fetch } = client(false, () => new Response(JSON.stringify({ result: [1] })));
     expect(await c.get("/things", { page: 2, per_page: 50, skip: undefined })).toEqual({ result: [1] });

@@ -17,7 +17,11 @@ Port the infra-sync Worker's reconcile logic to this tool. The input changes fro
   - **Which droplets to plan:**
     - A droplet with `status: "create"` gets ops with `pending: true` and `KNOWN_AFTER_CREATE` in place of IPs.
     - Droplets with `status: "missing" | "conflict"`, or with a `namingError`, are held: never deleted, never managed (like the Worker's `heldNames`).
-  - **Diagnostics:** the Worker's `skipped`/`conflicts`/`warnings`/`errors` become diagnostics.
+  - **Diagnostics:** the Worker's `skipped`/`conflicts`/`warnings`/`errors` become diagnostics. Mind the severity: **any error-level diagnostic blocks the whole apply**, so map them like this:
+    - Worker `errors` (a read failed, a dependent that will break) → `error`;
+    - `conflicts` (a name held by a record or app the tool doesn't own) and `skipped` (a region with no tunnel, no private IP yet) → `warning`. The Worker managed everything else and held these back, and the tool does the same;
+    - Worker `warnings` → `warning`.
+  - **Zones:** names are matched against `account.cloudflare.zones`, but the Worker matched against every zone in the account. Longest-suffix matching means an extra or missing zone changes labels. Emit an `error` when the observed account zones and `account.cloudflare.zones` differ.
   - **Guard rail:** if deletes exceed `account.cloudflare.guards` or a read failed, turn the deletes into `report` ops with the reason.
 - **`applyCloudflare(ctx, ops, observed)`.** Use the Worker's order (`sync.ts`):
   - creates: target → app → ingress → DNS;
@@ -29,7 +33,7 @@ Op keys and kinds: see `ResourceKind` in `src/core/plan.ts`. Always set `droplet
 
 ## Port from (in `../infra-sync/` of the audit folder, not in this repo)
 
-`src/plan.ts`, `src/ingress.ts`, `src/dependents.ts`, `src/sync.ts`, `src/clients/cloudflare.ts`, `src/config.ts` (constants are already in `src/core/constants.ts`), and the tests `test/sync.test.ts`, `test/ingress.test.ts`, `test/guardrails.test.ts`, `test/fake.ts`. **Port tests with fake data only** (`example.com`, RFC 5737 IPs, placeholder UUIDs): the Worker's tests and `web-config.json` carry real names and must not be copied into this public repo.
+`src/plan.ts`, `src/ingress.ts`, `src/dependents.ts`, `src/sync.ts`, `src/clients/cloudflare.ts`, `src/config.ts` (its constants are already in `src/core/constants.ts`: markers, app name prefixes, `INFRA_APP_NAME`, `SSH_USERNAMES`, `HEALTH_BYPASS_PATH`, `VPC_TTL`, `MAX_CNAME_CHAIN` and the web defaults; the admin emails come from `account.cloudflare.ssh_admin_emails`, never from code), and the tests `test/sync.test.ts`, `test/ingress.test.ts`, `test/guardrails.test.ts`, `test/fake.ts`. **Port tests with fake data only** (`example.com`, RFC 5737 IPs, placeholder UUIDs): the Worker's tests and `web-config.json` carry real names and must not be copied into this public repo.
 
 ## Mapping: Worker input → droplet file → desired state
 

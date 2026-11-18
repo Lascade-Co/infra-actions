@@ -5,7 +5,7 @@ Every run produces two outputs:
 - **one log line**, which goes to stdout and so to this public repo's Actions logs;
 - **a detail file**, written to the CLI's `--out` path. The workflow posts it as the PR comment on the private `infra` repo or keeps it out of the logs.
 
-Telegram gets a summary after apply and after drift.
+Telegram gets a summary after every apply (also when it was blocked or failed, since an apply has no PR to comment on) and after every drift run. The engine already calls `renderTelegram` and `sendTelegram` at those points.
 
 ## Already written in B0 (keep the rules)
 
@@ -31,7 +31,9 @@ Telegram gets a summary after apply and after drift.
   - hand-made changes, which are the plan's ops (each one is a difference between the files and the live accounts);
   - credential expiry from `report.credentials`, warning when the GitHub token expires within 14 days.
 - **`renderTelegram(report)`:** HTML messages, each under 4096 characters. The first line is a status (✅ ⚠️ ❌), then the counts. Port the Worker's `src/format.ts`: grouping, `packMessages`, the HTML escaping and the plain-text fallback.
-- **`sendTelegram(ctx, messages)`:** `POST https://api.telegram.org/bot<token>/sendMessage` to `account.telegram.chat_id`, with `TELEGRAM_BOT_TOKEN` taken from `ctx.secrets`. The token is part of the URL, so make sure no error message ever includes the URL.
+- **`sendTelegram(ctx, messages)`:** `POST https://api.telegram.org/bot<token>/sendMessage` to `account.telegram.chat_id`, with `TELEGRAM_BOT_TOKEN` taken from `ctx.secrets`.
+  - Call `ctx.fetch` directly, not `ApiClient`: a notification isn't an infrastructure write, and drift runs are read-only.
+  - The token is part of the URL, so make sure no error message ever includes the URL.
 
 ## Inputs and outputs
 

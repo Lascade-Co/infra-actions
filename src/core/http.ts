@@ -43,10 +43,14 @@ export class ApiClient {
     return this.opts.allowWrites;
   }
 
-  /** Sends a request and returns the parsed JSON body (or {} for an empty body). */
-  async request<T = unknown>(method: string, path: string, opts: { query?: Query; body?: unknown } = {}): Promise<T> {
+  /**
+   * Sends a request and returns the parsed JSON body (or {} for an empty body).
+   * `read: true` marks a non-GET call that only reads (e.g. an API whose list/query endpoints
+   * are POST); it is allowed in read-only runs. Use it only for endpoints documented as reads.
+   */
+  async request<T = unknown>(method: string, path: string, opts: { query?: Query; body?: unknown; read?: boolean } = {}): Promise<T> {
     const m = method.toUpperCase();
-    if (m !== "GET" && !this.opts.allowWrites) throw new WriteNotAllowedError(m, path);
+    if (m !== "GET" && !opts.read && !this.opts.allowWrites) throw new WriteNotAllowedError(m, path);
     const qs = opts.query
       ? "?" +
         new URLSearchParams(

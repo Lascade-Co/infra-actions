@@ -48,8 +48,8 @@ DigitalOcean droplets ──observe──▶ desired state (files ⨝ droplets, 
   2. Creates droplets and fixes their tags.
   3. Waits for the new droplets' IPs, then re-plans.
   4. Applies Cloudflare, firewall (report-only), OneUptime and the ssh config, in that order.
-  5. Sends the Telegram summary.
-- **`drift`:** read-only. Reports droplets with no file, hand-made changes (the plan's ops) and token expiry.
+  5. Sends the Telegram summary, including when apply was blocked or failed.
+- **`drift`:** read-only. Reports droplets with no file, hand-made changes (the plan's ops) and token expiry, and sends the summary to Telegram.
 - **`validate`:** load and schema only. Needs no secrets and makes no API calls.
 
 ## The droplet file

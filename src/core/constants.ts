@@ -14,6 +14,24 @@ export const DNS_COMMENT_MARKER = "managed-by:infra-sync";
 export const TARGET_TAG_KEY = "managed-by";
 export const TARGET_TAG_VALUE = "infra-sync";
 
+// ---------- Cloudflare object names (the Worker's, unchanged) ----------
+
+/** The one infrastructure app covering every target tagged managed-by=infra-sync. */
+export const INFRA_APP_NAME = "infra-sync: SSH targets";
+/** SSH usernames allowed by the infrastructure app's policy. */
+export const SSH_USERNAMES: readonly string[] = ["ubuntu", "root"];
+/** Public Bypass app on <droplet name>/<HEALTH_BYPASS_PATH> for every Deploy target. */
+export const HEALTH_APP_PREFIX = "infra-sync: healthcheck ";
+export const HEALTH_BYPASS_PATH = "healthcheck";
+/** Site apps: whole host (staff), protected path (public), exception path. */
+export const WEB_APP_PREFIX = "infra-sync: web ";
+export const WEB_ADMIN_APP_PREFIX = "infra-sync: web-admin ";
+export const WEB_EXCEPTION_APP_PREFIX = "infra-sync: web-exception ";
+/** TTL of the vpc- A records. */
+export const VPC_TTL = 60;
+/** CNAME chains to a site hostname are followed this many hops (dependents, guard rail 1). */
+export const MAX_CNAME_CHAIN = 4;
+
 // ---------- DigitalOcean tags written from droplet files ----------
 
 /** The Environment tag per environment. */
