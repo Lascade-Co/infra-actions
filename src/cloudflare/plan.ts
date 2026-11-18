@@ -866,7 +866,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
   for (const x of routes.staleRouteDns) deleteOwners.add(`route ${lc(x.record.name)}`);
   for (const x of routes.staleRouteIngress) deleteOwners.add(`route ${x.hostname}`);
   for (const a of routes.staleRouteApps) for (const d of appDomains(a)) deleteOwners.add(`route ${d}`);
-  for (const a of infra.deletes) deleteOwners.add(`infra-app ${a.name ?? a.id}`);
+  // An unwanted infrastructure app has no owner key: a retired droplet's own access set goes with it.
 
   let deletionBlockReason: string | undefined;
   if (tunnelErrors.size || dnsErrors.size || vpcErrors.size || web.dnsErrorZones.size) {
@@ -878,7 +878,8 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     } else if (deleteCount > 6 && deleteOwners.size > 1 && fraction > cfg.maxDeleteFraction) {
       // Deleting one droplet is always allowed (up to max_deletes), even in a small fleet:
       //  - > 6: a droplet without a site has at most 6 objects (ssh- DNS + ingress + app + target +
-      //    vpc- DNS + healthcheck app), so any 6 deletions pass;
+      //    vpc- DNS + healthcheck app), so any 6 deletions pass (its access set's app, if no other
+      //    droplet shares the set, is a 7th, but adds no owner, so the next rule lets it through);
       //  - deleteOwners.size > 1: a site droplet can have many more (per hostname: CNAME, route,
       //    one app per protected/exception path), so the fraction applies only when the deletions
       //    span more than one droplet.

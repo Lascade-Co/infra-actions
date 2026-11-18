@@ -314,6 +314,12 @@ describe("SSH access (decision 18)", () => {
     expect(ds[0]!.message).toBe('SSH group "devops" is not in account.yaml ssh_groups (known: admins, shop-team)');
   });
 
+  it("treats a group name that is also an object property (constructor) as unknown, without crashing", async () => {
+    const c = await config({ "droplets/app.example.com.yaml": shop("[admins, constructor]") });
+    expect(codes(checkConfig(c))).toEqual(["unknown-ssh-group"]);
+    expect(buildDesired(c, []).droplets.find((x) => x.name === "app.example.com")!.sshEmails).toEqual(["admin@example.com", "ops@example.com"]);
+  });
+
   it("rejects an email outside ssh_email_domain in a droplet file (the exact domain, not a suffix)", async () => {
     const ds = checkConfig(
       await config({ "droplets/app.example.com.yaml": shop("[someone@example.net, someone@sub.example.com, x@example.com.example.net, ok@example.com]") }),

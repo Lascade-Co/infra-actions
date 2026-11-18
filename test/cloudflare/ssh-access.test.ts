@@ -346,3 +346,25 @@ describe("moving a droplet between access sets", () => {
     expect(f.apps.some((a) => a.id === "foreign")).toBe(true);
   });
 });
+
+describe("retiring a droplet with its own access set", () => {
+  it("deletes its objects and its set's app together, within the one-droplet guard allowance", async () => {
+    const f = new FakeCloudflare();
+    f.droplets = [droplet(1, "a.example.com", "blr1", "10.0.1.2", ["env-staging", "ci-deploy"]), droplet(2, "b.example.com", "nyc1", "10.0.0.3", ["env-prod"])];
+    f.ssh["a.example.com"] = ["devs"];
+    await run(f, { account: account() });
+    expect(infraApps(f)).toHaveLength(2);
+    const aSet = target(f, "a.example.com").tags!["ssh-access"]!;
+
+    f.droplets = f.droplets.slice(1);
+    const gaps = watchCoverage(f);
+    const r = await run(f, { account: account() });
+    expect(r.warnings.join("\n")).not.toMatch(/refusing to delete/);
+    expect(gaps).toEqual([]);
+    // ssh- DNS, route, ssh- app, target, vpc- DNS, healthcheck app, and the set's app: 7 deletes.
+    expect(r.plan.ops.filter((o) => o.action === "delete")).toHaveLength(7);
+    expect(infraApps(f).map((a) => a.name)).toEqual([`infra-sync: SSH ${target(f, "b.example.com").tags!["ssh-access"]}`]);
+    expect(infraApps(f).some((a) => a.name === `infra-sync: SSH ${aSet}`)).toBe(false);
+    expect(changes(await planOnly(f, account()))).toEqual([]);
+  });
+});

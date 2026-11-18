@@ -120,7 +120,7 @@ export function resolveSshAccess(account: AccountConfig, ssh: readonly string[])
   const out = new Set<string>();
   for (const entry of ssh) {
     if (entry.includes("@")) out.add(entry.toLowerCase());
-    else for (const e of account.ssh_groups[entry] ?? []) out.add(e.toLowerCase());
+    else if (Object.hasOwn(account.ssh_groups, entry)) for (const e of account.ssh_groups[entry]!) out.add(e.toLowerCase());
   }
   return [...out].sort();
 }
