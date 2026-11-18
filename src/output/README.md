@@ -15,8 +15,8 @@ Telegram gets a summary after every apply (also when it was blocked or failed, s
 
 ## What B7 must do
 
-- **`renderPrComment(report)`** (check). A GitHub markdown comment with the heading "What happens when this is merged". It holds:
-  - pass/fail and counts first;
+- **`renderPrComment(report)`** (check). A GitHub markdown comment whose first line is `PR_COMMENT_MARKER` (`<!-- infra-actions:plan -->`, so the workflow finds and updates its own comment), then the heading "What happens when this is merged". It holds:
+  - pass/fail, what merging does, and a create/update/delete/report-only count table per provider first;
   - errors with `file:line path` (diagnostics carry them);
   - then the ops grouped by droplet, with the global ones (infra app, ssh config) under their own heading. For each op, show its action, kind, key and reason, and a compact `before → after` (use `<details>` for long ones);
   - a separate section for report-only ops: firewall rules (state "not enforced until Phase 5") and frozen droplets;
@@ -29,11 +29,13 @@ Telegram gets a summary after every apply (also when it was blocked or failed, s
 - **`renderDriftReport(report)`** (drift, daily):
   - droplets with no file;
   - hand-made changes, which are the plan's ops (each one is a difference between the files and the live accounts);
-  - credential expiry from `report.credentials`, warning when the GitHub token expires within 14 days.
-- **`renderTelegram(report)`:** HTML messages, each under 4096 characters. The first line is a status (✅ ⚠️ ❌), then the counts. Port the Worker's `src/format.ts`: grouping, `packMessages`, the HTML escaping and the plain-text fallback.
+  - credential expiry from `report.credentials`, warning when the GitHub token expires within 30 days (`EXPIRY_WARN_DAYS`), an error once it has expired.
+- **`renderTelegram(report)`:** HTML messages, each under 4096 characters. The first line is a status (❌ errors, failures or a blocked apply; ⚠️ warnings, drift or a token expiring soon; ✅ an apply that changed things or a clean drift run; ℹ️ nothing to do), then the time (from the report, never the clock) and the counts. Port the Worker's `src/format.ts`: grouping, `packMessages`, the HTML escaping and the plain-text fallback.
 - **`sendTelegram(ctx, messages)`:** `POST https://api.telegram.org/bot<token>/sendMessage` to `account.telegram.chat_id`, with `TELEGRAM_BOT_TOKEN` taken from `ctx.secrets`.
   - Call `ctx.fetch` directly, not `ApiClient`: a notification isn't an infrastructure write, and drift runs are read-only.
-  - The token is part of the URL, so make sure no error message ever includes the URL.
+  - The token is part of the URL, so make sure no error message ever includes the URL. It throws with a fixed message (HTTP status, part number) so the engine records a failed stage.
+
+The renderers never show `op.ids` (provider ids, and the ssh config text that `sshconfig` carries to apply there). They live in `markdown.ts` (PR comment, apply summary, drift report), `telegram.ts` and `common.ts`; `index.ts` re-exports them.
 
 ## Inputs and outputs
 
