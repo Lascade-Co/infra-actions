@@ -160,10 +160,10 @@ describe("engine: apply", () => {
   });
 });
 
-describe("engine: real registry before B1-B7", () => {
-  it("reports unimplemented stages instead of crashing, and the log line has counts only", async () => {
+describe("engine: real registry without credentials", () => {
+  it("fails the read-only run safely instead of crashing, and the log line has counts only", async () => {
     const report = await runEngine({ mode: "check", infraDir: EXAMPLE_DIR, env: {}, fetch: noFetch });
-    expect(report.stages.map((s) => s.status)).toContain("not-implemented");
+    expect(report.stages.find((s) => s.stage === "observe droplets")?.status).toBe("failed");
     expect(reportPassed(report)).toBe(false);
     expect(renderLogLine(report)).toMatch(/^infra check: FAIL \| droplet files 6 \| /);
   });

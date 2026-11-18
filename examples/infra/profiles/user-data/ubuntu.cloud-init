@@ -1,8 +1,11 @@
 #cloud-config
 # EXAMPLE ONLY. Setup for droplets the tool creates: a non-root user `ubuntu` with passwordless
 # sudo, sshd trusting the Cloudflare SSH CA (Access for Infrastructure), and no root login.
-# No Docker, no personal SSH keys. The real file (with the account's CA public key) lives in
-# the private infra repo.
+# No Docker, no personal SSH keys.
+#
+# The CA key below is a PLACEHOLDER. The Cloudflare SSH CA public key is not secret, but it is
+# specific to the Cloudflare account, so the real one lives only in this file's copy in the
+# private infra repo.
 users:
   - name: ubuntu
     shell: /bin/bash
@@ -17,7 +20,14 @@ write_files:
   - path: /etc/ssh/sshd_config.d/90-cloudflare-ca.conf
     permissions: "0644"
     content: |
+      # Cloudflare Access for Infrastructure: short-lived certificates signed by the account's CA
       TrustedUserCAKeys /etc/ssh/cloudflare_ca.pub
+  # sshd keeps the first value it reads for each keyword, and reads sshd_config.d/ in name
+  # order before the rest of sshd_config, so 00- wins over any image or cloud-init default.
+  - path: /etc/ssh/sshd_config.d/00-no-root-login.conf
+    permissions: "0644"
+    content: |
       PermitRootLogin no
 runcmd:
+  # Reload only if the new config is valid; a broken config must never lock everyone out.
   - [ sh, -c, "sshd -t && (systemctl reload ssh || systemctl reload sshd || true)" ]

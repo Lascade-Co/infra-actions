@@ -38,3 +38,16 @@ The engine observes this module first and applies it first: every other module p
 ## Port from
 
 The infra-sync Worker never wrote to DigitalOcean. Port only `src/clients/digitalocean.ts` (`listDroplets`) and the `Droplet` type from `src/types.ts`. For creation, see decision 10 of `iac-repo-design.md`: profiles, the region by env, cloud-init. Tests go in `test/droplets/` and use fake data only.
+
+## As built
+
+- **Files:** `api.ts` (the DigitalOcean endpoints, fail-closed list) and `index.ts` (map, plan, apply, provider).
+- **Plan shapes:** a create op's `after` is the create body without `user_data`, plus `profile`. A tags op has `before`/`after` = `{ tags: [...] }` (managed tags only, sorted) and `ids.droplet_id`.
+- **`user_data` never travels in an op.** The provider keeps the create bodies from its last `diff()` and passes them to `applyDroplets(ctx, ops, { requests })`. A create op without a body is refused.
+- **Apply order and stops:**
+  1. Refuse anything that isn't a droplets create or a droplets-tags update, before any request.
+  2. List all droplets again; a create whose name now exists is not sent.
+  3. Each create is sent once. An error is never retried: the op fails and every later op is skipped (a later apply sees the droplet by name if the request did create it).
+  4. Wait up to `MAX_POLLS` × `POLL_INTERVAL_MS` (60 × 5 s) for `active` with a public and a private IPv4; failed reads are retried until then; a timeout fails the op.
+  5. Tags: add, then remove (`GET /v2/tags/{tag}` first, `POST /v2/tags` on 404); the first error fails the op and skips the rest. Droplets created before a stop stay in `applied`.
+- **Profile drift** (size, image, or region not the env's) of an existing droplet whose file names a profile: info diagnostic `droplet-profile-drift`, never an op.

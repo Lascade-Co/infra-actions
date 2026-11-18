@@ -126,12 +126,12 @@ describe("cli", () => {
     expect(detail).not.toContain(SECRETS.DO_TOKEN);
   });
 
-  it("returns 1 when a stage is not implemented (real registry)", async () => {
+  it("returns 1 when a stage fails (real registry, no credentials)", async () => {
     const { io: x, stdout } = io({ modules: undefined, env: {} });
     delete x.modules;
     const code = await main(["check", EXAMPLE_DIR, "--out", join(dir, "r.md")], x);
     expect(code).toBe(1);
-    expect(stdout[0]).toMatch(/stages not implemented \d+$/);
+    expect(stdout[0]).toMatch(/failed stages \d+$/);
   });
 });
 
