@@ -46,7 +46,7 @@ describe("renderPrComment", () => {
 
   it("puts report-only ops in their own collapsed sections, never under the changes", () => {
     const md = renderPrComment(checkReport());
-    const fw = md.indexOf("<details><summary>Firewall rules: report only, not enforced until Phase 5 (1)</summary>");
+    const fw = md.indexOf("<details><summary>Firewall rules: report only, not enforced until Phase 5 (1 on 1 droplet(s))</summary>");
     expect(fw).toBeGreaterThan(md.indexOf("### Changes the apply will make (7)"));
     expect(md.indexOf("fw-db inbound tcp/5432")).toBeGreaterThan(fw);
     expect(md).toContain("<details><summary>Frozen droplets: changes shown, never applied (1)</summary>");
@@ -54,6 +54,63 @@ describe("renderPrComment", () => {
     const changes = md.slice(md.indexOf("### Changes the apply will make"), fw);
     expect(changes).not.toContain("data.example.com");
     expect(changes).not.toContain("old.example.com");
+  });
+
+  it("groups the firewall report per droplet, each collapsed with its counts", () => {
+    const fwOp = (droplet: string, key: string, before: PlanOp["before"], after: PlanOp["after"]): PlanOp =>
+      op({ provider: "digitalocean", module: "firewall", kind: "firewall-rule", key, action: "report", before, after, reason: `rule ${key}`, droplet });
+    const ops = [
+      fwOp("db.example.com", "db.example.com inbound tcp/5432 10.0.0.11", null, { ports: "5432" }),
+      fwOp("db.example.com", "fw-wide inbound tcp/0-65535 0.0.0.0/0 on db.example.com", { ports: "0-65535" }, null),
+      fwOp("shop.example.com", "fw-wide inbound tcp/22 0.0.0.0/0 on shop.example.com", { ports: "22" }, [{ ports: "22" }]),
+      fwOp("db.example.com", "fw-web inbound tcp/80 0.0.0.0/0 on db.example.com", { ports: "80" }, null),
+    ];
+    const r = checkReport();
+    r.plans = r.plans.map((p) => (p.module === "firewall" ? { ...p, ops } : p));
+    const md = renderPrComment(r);
+    const outer = md.indexOf("<details><summary>Firewall rules: report only, not enforced until Phase 5 (4 on 2 droplet(s))</summary>");
+    const db = md.indexOf("<details><summary>`db.example.com`: 1 to allow, 2 to remove</summary>");
+    const shop = md.indexOf("<details><summary>`shop.example.com`: 1 to narrow</summary>");
+    expect(outer).toBeGreaterThan(-1);
+    expect(db).toBeGreaterThan(outer);
+    expect(shop).toBeGreaterThan(db);
+    // Each droplet's rules sit inside its own block.
+    expect(md.indexOf("fw-web inbound tcp/80")).toBeGreaterThan(db);
+    expect(md.indexOf("fw-web inbound tcp/80")).toBeLessThan(shop);
+    balanced(md);
+  });
+
+  it("shows the Cloudflare warnings people act on under their own headings, never cut", () => {
+    const warn = (code: string, message: string, droplet: string) => ({ level: "warning" as const, code, message, droplet });
+    const r = checkReport();
+    r.plans = r.plans.map((p) =>
+      p.module === "cloudflare"
+        ? {
+            ...p,
+            diagnostics: [
+              ...p.diagnostics,
+              warn("cloudflare-awaiting-cutover", "shop.example.com: awaiting cutover (an A record not managed by the tool still holds the name)", "shop.example.com"),
+              warn("cloudflare-skipped", "db.example.com: no private IPv4 yet", "db.example.com"),
+              warn("cloudflare-conflict", "tools.example.net: another droplet has the same name", "tools.example.net"),
+              warn("cloudflare-route-not-built", "ch.example.com: 5000/udp: UDP goes through the client's private-network route", "db.example.com"),
+            ],
+          }
+        : p,
+    );
+    // Lots of other detail, so the comment has to be truncated.
+    const filler = Array.from({ length: 400 }, (_, i) => op({ kind: "dns-record", key: `A filler-${i}.example.com`, reason: "x".repeat(150), droplet: `filler-${i}.example.com` }));
+    r.plans.push({ module: "cloudflare", ops: filler, unchanged: 0, diagnostics: [] });
+    const md = renderPrComment(r);
+    expect(md).toContain("**Detail truncated:**");
+    expect(md).toContain("### ⚠️ Warnings (5)");
+    expect(md).toContain("#### Awaiting cutover (1)");
+    expect(md).toContain("#### Held: not managed this run (2)");
+    expect(md).toContain("#### Tunnel routes not built: add them by hand (1)");
+    expect(md).toContain("#### Other warnings (1)");
+    expect(md).toContain("shop.example.com: awaiting cutover");
+    expect(md).toContain("ch.example.com: 5000/udp");
+    expect(md.indexOf("#### Awaiting cutover")).toBeLessThan(md.indexOf("### Changes the apply will make"));
+    balanced(md);
   });
 
   it("shows ops the engine froze under frozen droplets", () => {
@@ -144,7 +201,7 @@ describe("renderApplySummary", () => {
     expect(md).toContain("- **delete** Cloudflare access-app `gone.example.com`: cloudflare DELETE /accounts/x/access/apps/y: HTTP 500");
     expect(md).toContain("### Applied (5)");
     expect(md).toContain("<details><summary>Skipped: waiting for a droplet that isn't up yet (1)</summary>");
-    expect(md).toContain("<details><summary>Firewall rules: report only, not enforced until Phase 5 (1)</summary>");
+    expect(md).toContain("<details><summary>Firewall rules: report only, not enforced until Phase 5 (1 on 1 droplet(s))</summary>");
     expect(md.indexOf("### ❌ Errors")).toBeLessThan(md.indexOf("### Applied"));
     balanced(md);
   });

@@ -158,11 +158,42 @@ function errorsSection(doc: Doc, r: RunReport, extra: string[] = []) {
   if (stages.length) doc.always(...(errors.length || extra.length ? [""] : []), "Stages that did not run:", "", ...stages);
 }
 
+/**
+ * Warnings people must act on, each under its own heading and never cut for size (there is at
+ * most one per droplet or route). The cloudflare module's codes (src/cloudflare/plan.ts).
+ */
+export const WARNING_GROUPS: ReadonlyArray<{ title: string; codes: readonly string[]; intro: string }> = [
+  {
+    title: "Awaiting cutover",
+    codes: ["cloudflare-awaiting-cutover"],
+    intro: "A record the tool doesn't own still holds these names, so their site isn't routed through the tunnel yet. The cutover swaps each one in place; until then the tool leaves it alone.",
+  },
+  {
+    title: "Held: not managed this run",
+    codes: ["cloudflare-skipped", "cloudflare-conflict"],
+    intro: "The tool neither changes nor deletes the Cloudflare objects of these droplets or names until the reason below is fixed.",
+  },
+  {
+    title: "Tunnel routes not built: add them by hand",
+    codes: ["cloudflare-route-not-built"],
+    intro: "UDP ports and port ranges in `allow.tunnel` need a private-network route the tool does not build.",
+  },
+];
+
 function warningsSections(doc: Doc, r: RunReport) {
   const ds = allDiagnostics(r);
   const warnings = ds.filter((d) => d.level === "warning");
   const infos = ds.filter((d) => d.level === "info");
-  doc.section(`\n### ⚠️ Warnings (${warnings.length})\n`, warnings.map(diagLine));
+  const grouped = new Set(WARNING_GROUPS.flatMap((g) => g.codes));
+  const groups = WARNING_GROUPS.map((g) => ({ ...g, items: warnings.filter((d) => g.codes.includes(d.code)) })).filter((g) => g.items.length);
+  const rest = warnings.filter((d) => !grouped.has(d.code));
+  if (groups.length) {
+    doc.always("", `### ⚠️ Warnings (${warnings.length})`);
+    for (const g of groups) doc.always("", `#### ${g.title} (${g.items.length})`, "", mdText(g.intro), "", ...g.items.map(diagLine));
+    doc.section(`\n#### Other warnings (${rest.length})\n`, rest.map(diagLine));
+  } else {
+    doc.section(`\n### ⚠️ Warnings (${warnings.length})\n`, warnings.map(diagLine));
+  }
   doc.section(`\n<details><summary>Notes (${infos.length})</summary>\n`, infos.map(diagLine), "\n</details>");
 }
 
@@ -181,13 +212,37 @@ function collapsed(doc: Doc, summary: string, items: string[], intro?: string) {
   doc.section(`\n<details><summary>${summary} (${items.length})</summary>\n${intro ? `\n${intro}\n` : ""}`, items, "\n</details>");
 }
 
-function reportOnlySections(doc: Doc, ops: PlanOp[]) {
-  collapsed(
-    doc,
-    "Firewall rules: report only, not enforced until Phase 5",
-    ops.filter(isFirewallReport).map((op) => opItem(op, { action: false })),
-    "What the `allow:` and `swarm:` sections imply for the DigitalOcean firewalls. Nothing here is applied.",
+/** "3 to allow, 1 to narrow, 2 to remove" for a droplet's firewall report ops. */
+function firewallCounts(ops: PlanOp[]): string {
+  const allow = ops.filter((op) => op.before === null).length;
+  const remove = ops.filter((op) => op.before !== null && op.after === null).length;
+  const narrow = ops.length - allow - remove;
+  return [allow ? `${allow} to allow` : "", narrow ? `${narrow} to narrow` : "", remove ? `${remove} to remove` : ""].filter(Boolean).join(", ");
+}
+
+/**
+ * The firewall report is large (broad firewalls attached by tag show up on every droplet), so it is
+ * one collapsed block, and inside it one collapsed block per droplet with its counts in the summary.
+ */
+function firewallSection(doc: Doc, ops: PlanOp[]) {
+  const fw = ops.filter(isFirewallReport);
+  if (!fw.length) return;
+  const groups = byDroplet(fw);
+  doc.always(
+    "",
+    `<details><summary>Firewall rules: report only, not enforced until Phase 5 (${fw.length} on ${groups.length} droplet(s))</summary>`,
+    "",
+    "What the `allow:` and `swarm:` sections imply for the DigitalOcean firewalls, per droplet. Nothing here is applied.",
   );
+  for (const [droplet, group] of groups) {
+    const name = droplet ? code(droplet) : "Not tied to one droplet";
+    doc.section(`\n<details><summary>${name}: ${firewallCounts(group)}</summary>\n`, group.map((op) => opItem(op, { action: false })), "\n</details>");
+  }
+  doc.always("", "</details>");
+}
+
+function reportOnlySections(doc: Doc, ops: PlanOp[]) {
+  firewallSection(doc, ops);
   collapsed(
     doc,
     "Frozen droplets: changes shown, never applied",
