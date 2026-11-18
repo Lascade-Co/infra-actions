@@ -1,0 +1,32 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Lascade-Co/infra-actions/schema/profile.schema.json",
+  "title": "Droplet profile",
+  "description": "profiles/<name>.yaml in the infra repo: the recipe for a droplet the tool creates. The region is not part of the profile: it follows the droplet's env (account.yaml digitalocean.regions); the VPC is the region's default.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "size", "image", "user_data"],
+  "properties": {
+    "name": {
+      "description": "Must equal the file name without .yaml.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]{0,62}$"
+    },
+    "description": { "type": "string", "maxLength": 500 },
+    "size": {
+      "description": "DigitalOcean size slug, e.g. s-1vcpu-1gb.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9-]*$"
+    },
+    "image": {
+      "description": "DigitalOcean image slug, pinned (bumped by pull request), e.g. ubuntu-26-04-x64.",
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9.-]*$"
+    },
+    "user_data": {
+      "description": "cloud-init file in profiles/ (a plain file name, must start with #cloud-config).",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"
+    }
+  }
+}

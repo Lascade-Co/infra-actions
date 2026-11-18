@@ -1,0 +1,258 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "https://github.com/Lascade-Co/infra-actions/schema/account.schema.json",
+  "title": "Account config",
+  "description": "account.yaml in the infra repo: account-level values the tool needs. Real values live only in the private infra repo; no secrets here (tokens come from environment variables).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "cloudflare",
+    "digitalocean",
+    "github",
+    "ssh_config"
+  ],
+  "properties": {
+    "cloudflare": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "account_id",
+        "team_domain",
+        "zones",
+        "tunnels",
+        "staff_policy_id",
+        "ssh_admin_emails",
+        "service_tokens",
+        "ci_deploy_tokens"
+      ],
+      "properties": {
+        "account_id": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        },
+        "team_domain": {
+          "description": "Access team domain, e.g. https://example.cloudflareaccess.com",
+          "type": "string",
+          "pattern": "^https://[a-z0-9-]+\\.cloudflareaccess\\.com$"
+        },
+        "zones": {
+          "description": "Zones droplet names live under.",
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/domain"
+          }
+        },
+        "tunnels": {
+          "description": "Tunnel UUID per DigitalOcean region slug.",
+          "type": "object",
+          "minProperties": 1,
+          "propertyNames": {
+            "$ref": "#/definitions/region"
+          },
+          "additionalProperties": {
+            "$ref": "#/definitions/uuid"
+          }
+        },
+        "staff_policy_id": {
+          "description": "UUID of the reusable Access policy \"staff\".",
+          "$ref": "#/definitions/uuid"
+        },
+        "ssh_admin_emails": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "pattern": "^[^@\\s]+@[a-z0-9.-]+\\.[a-z]{2,}$"
+          }
+        },
+        "service_tokens": {
+          "description": "Every Access service token the droplet files may name: name -> token UUID.",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]*$"
+          },
+          "additionalProperties": {
+            "$ref": "#/definitions/uuid"
+          }
+        },
+        "ci_deploy_tokens": {
+          "description": "Service-token names allowed to SSH into Deploy targets, per environment.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "prod",
+            "staging",
+            "internal"
+          ],
+          "properties": {
+            "prod": {
+              "$ref": "#/definitions/tokenNames"
+            },
+            "staging": {
+              "$ref": "#/definitions/tokenNames"
+            },
+            "internal": {
+              "$ref": "#/definitions/tokenNames"
+            }
+          }
+        },
+        "guards": {
+          "description": "Delete guard rails. Defaults: 20 deletes, 30% of owned objects.",
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "max_deletes": {
+              "type": "integer",
+              "minimum": 0,
+              "default": 20
+            },
+            "max_delete_fraction": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1,
+              "default": 0.3
+            }
+          }
+        }
+      }
+    },
+    "digitalocean": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "regions"
+      ],
+      "properties": {
+        "regions": {
+          "description": "Region a new droplet of each environment is created in.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "prod",
+            "staging",
+            "internal"
+          ],
+          "properties": {
+            "prod": {
+              "$ref": "#/definitions/region"
+            },
+            "staging": {
+              "$ref": "#/definitions/region"
+            },
+            "internal": {
+              "$ref": "#/definitions/region"
+            }
+          }
+        }
+      }
+    },
+    "oneuptime": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "url",
+        "project_id"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "pattern": "^https://[a-z0-9.-]+(:[0-9]{1,5})?$"
+        },
+        "project_id": {
+          "$ref": "#/definitions/uuid"
+        },
+        "on_call_policy_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "$ref": "#/definitions/uuid"
+          }
+        }
+      }
+    },
+    "github": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "infra_repo"
+      ],
+      "properties": {
+        "infra_repo": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9-]+/[A-Za-z0-9._-]+$"
+        },
+        "ssh_config_branch": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._/-]+$",
+          "default": "ssh-config"
+        },
+        "ssh_config_file": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9._-]+$",
+          "default": "ssh_config"
+        }
+      }
+    },
+    "telegram": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "chat_id"
+      ],
+      "properties": {
+        "chat_id": {
+          "type": "string",
+          "pattern": "^-?[0-9]+$"
+        }
+      }
+    },
+    "ssh_config": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "title"
+      ],
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100
+        },
+        "user": {
+          "type": "string",
+          "pattern": "^[a-z_][a-z0-9_-]*$",
+          "default": "ubuntu"
+        }
+      }
+    }
+  },
+  "definitions": {
+    "domain": {
+      "type": "string",
+      "pattern": "^(?=.{1,253}$)([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$",
+      "description": "A lowercase domain such as example.com."
+    },
+    "uuid": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+      "description": "A lowercase UUID."
+    },
+    "region": {
+      "type": "string",
+      "pattern": "^[a-z]{3}[0-9]$",
+      "description": "A DigitalOcean region slug such as nyc1."
+    },
+    "tokenNames": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-z0-9][a-z0-9_-]*$"
+      }
+    }
+  }
+}
