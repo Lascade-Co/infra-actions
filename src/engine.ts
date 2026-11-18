@@ -68,16 +68,26 @@ class Stages {
   }
 }
 
-/** Ops for a frozen droplet become report ops: shown in the plan, never applied. */
+/** Reason prefix of a frozen droplet's SSH access change, which is applied (the PR comment shows it). */
+export const FROZEN_SSH_REASON = "frozen: only SSH access changes are applied";
+
+/** A frozen droplet's SSH access change: a cloudflare update of its target's tag or its ssh- app's include list. */
+export const isFrozenSshChange = (op: PlanOp): boolean =>
+  op.appliesWhenFrozen === true && op.provider === "cloudflare" && op.action === "update" && (op.kind === "infra-target" || op.kind === "access-app");
+
+/**
+ * Ops for a frozen droplet become report ops: shown in the plan, never applied. The one exception
+ * is its SSH access (isFrozenSshChange): applied, with the reason saying so.
+ */
 export function freezeOps(plan: ModulePlan, frozen: ReadonlySet<string>): ModulePlan {
   if (!frozen.size) return plan;
   return {
     ...plan,
-    ops: plan.ops.map((op) =>
-      op.droplet && frozen.has(op.droplet) && op.action !== "report"
-        ? { ...op, action: "report" as const, reason: `frozen droplet, would ${op.action}: ${op.reason}` }
-        : op,
-    ),
+    ops: plan.ops.map((op) => {
+      if (!op.droplet || !frozen.has(op.droplet) || op.action === "report") return op;
+      if (isFrozenSshChange(op)) return { ...op, reason: `${FROZEN_SSH_REASON}: ${op.reason}` };
+      return { ...op, action: "report" as const, reason: `frozen droplet, would ${op.action}: ${op.reason}` };
+    }),
   };
 }
 

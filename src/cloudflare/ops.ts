@@ -15,7 +15,7 @@ import type { DesiredState } from "../core/desired.js";
 import type { Json, PlanOp } from "../core/plan.js";
 import { flattenName } from "../core/naming.js";
 import { LEGACY_INFRA_APP_NAME } from "../core/constants.js";
-import { appDestinations, appDomains, lc, webAppKind } from "./bodies.js";
+import { appDestinations, appDomains, lc, normPolicies, webAppKind } from "./bodies.js";
 import { mergeIngress, rulesFor, type UpsertTarget } from "./ingress.js";
 import type { Plan, Snapshot } from "./plan.js";
 import type { AccessApp, AccessPolicy, DnsRecord, IngressRule, InfraTarget, ReadError, TunnelConfiguration } from "./types.js";
@@ -138,8 +138,46 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
 
   for (const h of plan.hosts) {
     const t = h.target;
+    const ft = h.frozenTarget;
     if (t.op === "noop") unchanged++;
-    else
+    else if (ft) {
+      // Frozen droplet: its SSH access set is applied (only the tag changes); anything else about
+      // its target (a new IP, a rename) stays report-only, as a second op.
+      add({
+        phase: PHASE.target,
+        role: "T",
+        chain: `ssh ${h.sshHostname}`,
+        setId: h.setId,
+        op: {
+          kind: "infra-target",
+          key: h.name,
+          action: "update",
+          before: targetView(ft.existing),
+          after: j(ft.body),
+          reason: "the droplet's SSH access set changed (the ssh-access tag selects its Access app)",
+          droplet: h.name,
+          ids: { id: ft.existingId },
+          appliesWhenFrozen: true,
+          ...(h.access ? { sshAccess: { before: h.access.before, after: h.access.after } } : {}),
+        },
+      });
+      if (ft.existing.hostname !== h.name || ft.existing.ip?.ipv4?.ip_addr !== h.privateIp) {
+        add({
+          phase: PHASE.target,
+          role: "free",
+          op: {
+            kind: "infra-target",
+            key: `${h.name} (beyond SSH access)`,
+            action: "update",
+            before: targetView(ft.existing),
+            after: j(t.body),
+            reason: ft.existing.hostname !== h.name ? "the droplet was renamed (same private IP)" : "the droplet's private IP changed",
+            droplet: h.name,
+            ids: { id: ft.existingId },
+          },
+        });
+      }
+    } else
       add(
         {
           phase: PHASE.target,
@@ -169,8 +207,44 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
       );
     if (h.hostnameBlocked) continue;
     if (h.app) {
+      const fa = h.frozenApp;
       if (h.app.op === "noop") unchanged++;
-      else
+      else if (fa) {
+        // Frozen droplet: only the people on its ssh- app change; the rest (CI deploy tokens, ...)
+        // stays report-only, as a second op.
+        add({
+          phase: PHASE.sshApp,
+          role: "A",
+          chain: `ssh ${h.sshHostname}`,
+          op: {
+            kind: "access-app",
+            key: h.sshHostname,
+            action: "update",
+            before: appView(fa.existing),
+            after: j(fa.body),
+            reason: "the people on the droplet's SSH route changed (its ssh list)",
+            droplet: h.name,
+            ids: { id: fa.existingId },
+            appliesWhenFrozen: true,
+          },
+        });
+        if (normPolicies(fa.body.policies) !== normPolicies(h.app.body.policies as AccessPolicy[])) {
+          add({
+            phase: PHASE.sshApp,
+            role: "free",
+            op: {
+              kind: "access-app",
+              key: `${h.sshHostname} (beyond SSH access)`,
+              action: "update",
+              before: appView(fa.existing),
+              after: j(h.app.body),
+              reason: "the SSH route's Access policies changed (CI deploy tokens)",
+              droplet: h.name,
+              ids: { id: fa.existingId },
+            },
+          });
+        }
+      } else
         add(
           {
             phase: PHASE.sshApp,

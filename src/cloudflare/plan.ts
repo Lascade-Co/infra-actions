@@ -57,6 +57,7 @@ import {
   sameWebApp,
   sshAccessOf,
   sshAccessSetId,
+  sshListOnlyAppBody,
   type SshAccessView,
   type TargetBody,
   targetBody,
@@ -191,8 +192,15 @@ export interface HostPlan {
   /** The droplet's SSH access list, resolved (lowercase, sorted), and its set id (the ssh-access tag). */
   sshEmails: string[];
   setId: string;
-  /** Frozen droplet: its ops become report ops, so its target keeps its current tags. */
+  /** Frozen droplet: its ops become report ops, except its SSH access (frozenTarget, frozenApp). */
   frozen: boolean;
+  /**
+   * Frozen droplet whose target exists with another ssh-access tag: the existing target with only
+   * that tag changed (applied despite frozen; the rest of the target change stays report-only).
+   */
+  frozenTarget?: { existingId: string; existing: InfraTarget; body: TargetBody };
+  /** Frozen droplet whose ssh- app lets in other people: the existing app with only that include list changed. */
+  frozenApp?: { existingId: string; existing: AccessApp; body: AppBody };
   /** Who may SSH into the droplet through the infrastructure apps now and after this apply, when that changes. */
   access?: { before: SshAccessView; after: SshAccessView };
   /** Set when something on the ssh- hostname belongs to someone else or cannot be read: then only the target is managed. */
@@ -600,6 +608,11 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
         ? { op: "update", existingId: existingT.id, existing: existingT, body: tBody }
         : { op: "noop", existingId: existingT.id, existing: existingT, body: tBody };
 
+    // A frozen droplet's SSH access is the one thing applied for it (option b): its target's tag only.
+    const frozenTarget =
+      c.frozen && existingT && !sameTags(existingT.tags, tBody.tags)
+        ? { existingId: existingT.id, existing: existingT, body: { hostname: existingT.hostname, ip: existingT.ip, tags: tBody.tags } as TargetBody }
+        : undefined;
     const hp: HostPlan = {
       name: c.name,
       privateIp: c.privateIp,
@@ -613,6 +626,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       sshEmails: c.sshEmails,
       setId,
       frozen: c.frozen,
+      ...(frozenTarget ? { frozenTarget } : {}),
       ingressService: `ssh://${c.privateIp}:22`,
       pending: c.pending,
     };
@@ -646,6 +660,11 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       hp.app = same
         ? { op: "noop", existingId: existingA.id, existing: existingA, body: aBody }
         : { op: "update", existingId: existingA.id, existing: existingA, body: { ...aBody, policies: withPolicyIds(aBody.policies, existingA.policies) } };
+      // Frozen: only the people on its ssh- app change (the rest stays report-only).
+      const listOnly = c.frozen && !same ? sshListOnlyAppBody(existingA, c.sshEmails) : undefined;
+      if (listOnly && normPolicies(listOnly.policies) !== normPolicies(existingA.policies)) {
+        hp.frozenApp = { existingId: existingA.id, existing: existingA, body: listOnly };
+      }
     }
 
     const dBody = dnsBody(h, c.tunnelId);
@@ -951,9 +970,10 @@ interface InfraResult {
 /**
  * The wanted apps (one per set the managed droplets use) and the owned ones no set wants. An
  * unwanted app is deleted only when no target would be left without an app: every owned target
- * that remains after this apply must carry the ssh-access tag of a wanted set. Frozen droplets keep
- * their current tags (their ops are report-only) and targets of droplets not managed this run keep
- * theirs, so the app they rely on (the Worker's single app, or an old set's app) is kept and reported.
+ * that remains after this apply must carry the ssh-access tag of a wanted set. Frozen droplets are
+ * retagged too (their SSH access is the one change applied for them); targets of droplets not
+ * managed this run keep their tags, so the app they rely on (the Worker's single app, or an old
+ * set's app) is kept and reported.
  * Apply order (ops.ts): wanted apps first, then targets (each retag waits for its set's app), then
  * the deletes, after every app and target op of the run succeeded.
  */
@@ -999,7 +1019,8 @@ function planInfraApps(
   const remaining: Array<{ label: string; tags: Record<string, string> | undefined }> = [];
   for (const h of hosts) {
     if (!h.target.existing) continue;
-    remaining.push(h.frozen ? { label: `${h.name} (frozen)`, tags: h.target.existing.tags } : { label: h.name, tags: h.target.body.tags });
+    // A frozen droplet's tag is changed too (its SSH access is the one thing applied for it).
+    remaining.push({ label: h.name, tags: h.target.body.tags });
   }
   for (const t of ownedTargets) {
     if (claimedTargetIds.has(t.id) || gone.has(t.id)) continue;
@@ -1015,7 +1036,7 @@ function planInfraApps(
     if (keptFor.length) {
       warn(
         `Access app "${a.name}" is kept: SSH to ${keptFor.join(", ")} still goes only through it. ` +
-          "It is removed once their targets are tagged with their own SSH access set (unfreeze the droplet, or fix what holds it)",
+          "It is removed once their targets are tagged with their own SSH access set (fix what holds them)",
       );
     }
   }

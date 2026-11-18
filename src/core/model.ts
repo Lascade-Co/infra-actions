@@ -187,7 +187,11 @@ export interface DropletFile {
   env?: EnvName;
   /** Deploy target (the `ci-deploy` tag). */
   deploy: boolean;
-  /** The plan shows this droplet's changes, but apply skips them (e.g. a droplet that needs an owner's go-ahead). */
+  /**
+   * The plan shows this droplet's changes, but apply skips them (e.g. a droplet that needs an
+   * owner's go-ahead), except its SSH access: the ssh-access tag on its existing Cloudflare target
+   * and the people on its existing ssh- app (engine.ts freezeOps, PlanOp.appliesWhenFrozen).
+   */
   frozen: boolean;
   /**
    * SSH access list: group names (keys of account ssh_groups) and/or emails, as written (at least

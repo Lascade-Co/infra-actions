@@ -210,6 +210,9 @@ const tokenRules = (ids: string[]): AccessRule[] => ids.map((token_id) => ({ ser
  * list. The policy keeps the Worker's name "ssh-admins", so a droplet whose list equals the Worker's
  * admins shows no change.
  */
+/** Name of the Allow policy on a droplet's ssh- app that lists its people (the Worker's name). */
+export const SSH_LIST_POLICY = `${NAME_PREFIX} ssh-admins`;
+
 export function appBody(sshHostname: string, sshEmails: string[], tokenIds: string[], env?: EnvName): AppBody {
   const policies: AccessPolicy[] = [];
   if (tokenIds.length) {
@@ -219,7 +222,7 @@ export function appBody(sshHostname: string, sshEmails: string[], tokenIds: stri
       include: tokenRules(tokenIds),
     });
   }
-  policies.push({ name: `${NAME_PREFIX} ssh-admins`, decision: "allow", include: emailRules(sshEmails) });
+  policies.push({ name: SSH_LIST_POLICY, decision: "allow", include: emailRules(sshEmails) });
   policies.forEach((p, i) => (p.precedence = i + 1));
   return {
     name: `${NAME_PREFIX} ${sshHostname}`,
@@ -232,6 +235,31 @@ export function appBody(sshHostname: string, sshEmails: string[], tokenIds: stri
 }
 
 /** One SSH access set: port 22 of every target tagged ssh-access=<set id>, for these people, as ubuntu only. */
+/**
+ * A frozen droplet's ssh- app with only its people changed: the existing app as it is, with the
+ * include list of its SSH_LIST_POLICY replaced. Undefined when the app has no such policy.
+ */
+export function sshListOnlyAppBody(existing: AccessApp, sshEmails: string[]): AppBody | undefined {
+  const ps = existing.policies ?? [];
+  if (!ps.some((p) => p.name === SSH_LIST_POLICY && p.decision === "allow")) return undefined;
+  return {
+    name: existing.name ?? "",
+    type: "self_hosted",
+    domain: existing.domain ?? "",
+    app_launcher_visible: existing.app_launcher_visible ?? false,
+    session_duration: existing.session_duration ?? "24h",
+    policies: ps.map((p, i) => ({
+      ...(p.id ? { id: p.id } : {}),
+      name: p.name,
+      decision: p.decision,
+      include: p.name === SSH_LIST_POLICY && p.decision === "allow" ? emailRules(sshEmails) : p.include,
+      ...(p.exclude?.length ? { exclude: p.exclude } : {}),
+      ...(p.require?.length ? { require: p.require } : {}),
+      precedence: p.precedence ?? i + 1,
+    })),
+  };
+}
+
 export function infraAppBody(setId: string, emails: string[]): InfraAppBody {
   return {
     name: infraAppName(setId),

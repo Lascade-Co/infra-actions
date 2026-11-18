@@ -75,6 +75,12 @@ export interface PlanOp {
    * the people and usernames before and after. Shown in the PR comment, never sent to an API.
    */
   sshAccess?: { before: SshAccess; after: SshAccess };
+  /**
+   * The one exception to frozen (Rohit, 2026-11-19, option b): a cloudflare `update` that changes
+   * only who may SSH into a frozen droplet (its target's ssh-access tag, or the include list of its
+   * ssh- app) is applied anyway. freezeOps (engine.ts) honours it only for those two kinds.
+   */
+  appliesWhenFrozen?: boolean;
 }
 
 /** Who may SSH into a droplet through the infrastructure apps, and as which users. Sorted. */

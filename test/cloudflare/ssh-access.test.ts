@@ -215,29 +215,95 @@ describe("migration from the Worker's single app", () => {
     expect(md).toContain("Root SSH login is removed on 3 droplet(s).");
   });
 
-  it("keeps the Worker's app while a frozen droplet still relies on it, then removes it once the droplet is unfrozen", async () => {
+  it("moves a frozen droplet to its set's app too and deletes the Worker's app once every droplet is covered", async () => {
     const f = await workerState();
     f.frozen.add("b.example.com");
     const gaps = watchCoverage(f);
     const r = await run(f, { account: account() });
     expect(r.result.failed).toEqual([]);
     expect(gaps).toEqual([]);
+    expect(target(f, "b.example.com").tags!["ssh-access"]).toBe(target(f, "a.example.com").tags!["ssh-access"]);
+    expect(f.apps.some((a) => a.id === "worker-infra-app")).toBe(false);
+    expect(r.warnings.join("\n")).not.toMatch(/is kept/);
+    const b = r.plan.ops.find((o) => o.kind === "infra-target" && o.key === "b.example.com")!;
+    expect(b.action).toBe("update");
+    expect(b.reason).toMatch(/^frozen: only SSH access changes are applied: /);
+    expect(changes(await planOnly(f, account()))).toEqual([]);
+  });
+
+  it("a frozen droplet gets only its SSH access changed: its target's tag and its ssh- app's people; the rest is planned, not applied", async () => {
+    const f = await workerState();
+    f.frozen.add("b.example.com");
+    f.ssh["b.example.com"] = ["devs"];
+    // Other changes for b: a new private IP (target, ssh- route, vpc- record) and deploy (CI tokens on its ssh- app, a healthcheck app).
+    f.droplets = f.droplets.map((d) => (d.name === "b.example.com" ? { ...d, privateIp: "10.0.0.33", tags: [...d.tags, "ci-deploy"] } : d));
+    const acct = { ...account(), cloudflare: { ...account().cloudflare, ci_deploy_tokens: { ...account().cloudflare.ci_deploy_tokens, prod: ["ci-staging"] } } };
+    const appBefore = structuredClone(f.apps.find((a) => a.domain === "ssh-b.example.com")!);
+    const tunnelsBefore = structuredClone(f.tunnels);
+    const vpcBefore = structuredClone(Object.values(f.dns).flat().find((x) => x.name === "vpc-b.example.com"));
+    const gaps = watchCoverage(f);
+    const r = await run(f, { account: acct });
+    expect(r.result.failed).toEqual([]);
+    expect(gaps).toEqual([]);
+
+    // Applied: the tag (IP and hostname untouched) and the people on the ssh- app (its other policies untouched).
+    const t = target(f, "b.example.com");
+    expect(t.ip.ipv4?.ip_addr).toBe("10.0.0.3");
+    expect(t.tags!["ssh-access"]).toMatch(/^[0-9a-f]{12}$/);
+    expect(t.tags!["ssh-access"]).not.toBe(target(f, "a.example.com").tags!["ssh-access"]);
+    expect(infraApps(f).find((a) => a.name === `infra-sync: SSH ${t.tags!["ssh-access"]}`)).toBeDefined();
+    expect(emailsOf(infraApps(f).find((a) => a.name === `infra-sync: SSH ${t.tags!["ssh-access"]}`)!)).toEqual([DEV]);
+    const app = f.apps.find((a) => a.domain === "ssh-b.example.com")!;
+    expect(emailsOf(app)).toEqual([DEV]);
+    expect(app.policies!.map((p) => [p.id, p.name, p.decision])).toEqual(appBefore.policies!.map((p) => [p.id, p.name, p.decision]));
+    expect(app.policies!.some((p) => p.decision === "non_identity")).toBe(false);
+
+    // Not applied: route, vpc- record, healthcheck app, the IP on the target, the CI tokens.
+    expect(f.tunnels).toEqual(tunnelsBefore);
+    expect(Object.values(f.dns).flat().find((x) => x.name === "vpc-b.example.com")).toEqual(vpcBefore);
+    expect(f.apps.some((a) => (a.domain ?? "").startsWith("b.example.com/"))).toBe(false);
+    const reports = opKeys(r.plan, "report");
+    expect(reports).toEqual(
+      expect.arrayContaining([
+        "report infra-target b.example.com (beyond SSH access)",
+        "report access-app ssh-b.example.com (beyond SSH access)",
+        "report dns-record A vpc-b.example.com",
+        "report access-app b.example.com/healthcheck",
+      ]),
+    );
+    expect(r.plan.ops.filter((o) => o.droplet === "b.example.com" && o.action !== "report").map((o) => `${o.kind} ${o.key}`).sort()).toEqual(
+      ["access-app ssh-b.example.com", "infra-target b.example.com"],
+    );
+    // The Worker's app goes: every droplet, the frozen one included, is on its set's app.
+    expect(f.apps.some((a) => a.id === "worker-infra-app")).toBe(false);
+
+    // The PR comment shows the frozen droplet's SSH change as the allowed exception.
+    const report = newReport("check", new Date("2026-11-19T04:00:00Z"));
+    report.plans = [r.plan];
+    const md = renderPrComment(report);
+    const section = md.slice(md.indexOf("### Changes the apply will make"));
+    expect(section).toContain("frozen: only SSH access changes are applied: the droplet's SSH access set changed");
+    expect(section).toContain("frozen: only SSH access changes are applied: the people on the droplet's SSH route changed");
+    expect(md).toContain("frozen droplet, would update: the droplet's private IP changed");
+
+    // A re-plan: SSH access is done; only the frozen droplet's other changes remain, as reports.
+    const again = await planOnly(f, acct);
+    expect(changes(again)).toEqual([]);
+    expect(again.ops.filter((o) => o.droplet === "b.example.com").every((o) => o.action === "report")).toBe(true);
+  });
+
+  it("a frozen droplet's failed retag keeps the Worker's app, so it stays covered", async () => {
+    const f = await workerState();
+    f.frozen.add("b.example.com");
+    const bId = target(f, "b.example.com").id;
+    f.failWhen((c) => (c.method === "PUT" && c.path.endsWith(`/infrastructure/targets/${bId}`) ? { status: 500 } : undefined));
+    const gaps = watchCoverage(f);
+    const r = await run(f, { account: account() });
+    expect(gaps).toEqual([]);
+    expect(r.result.failed.map((x) => `${x.op.kind} ${x.op.key}`)).toEqual(["infra-target b.example.com"]);
+    expect(r.result.skipped.map((x) => `${x.op.kind} ${x.op.key}`)).toContain("infra-app infra-sync: SSH targets");
     expect(f.apps.some((a) => a.id === "worker-infra-app")).toBe(true);
     expect(target(f, "b.example.com").tags).toEqual({ "managed-by": "infra-sync" });
-    expect(target(f, "a.example.com").tags!["ssh-access"]).toMatch(/^[0-9a-f]{12}$/);
-    expect(opKeys(r.plan, "report")).toContain("report infra-app infra-sync: SSH targets");
-    expect(r.warnings.join("\n")).toMatch(/"infra-sync: SSH targets" is kept: SSH to b\.example\.com \(frozen\) still goes only through it/);
-    // While the Worker's app is kept, a's people and users don't change (root stays), so the plan shows no SSH access change.
-    const a = r.plan.ops.find((o) => o.kind === "infra-target" && o.key === "a.example.com")!;
-    expect(a.action).toBe("update");
-    expect(a.sshAccess).toBeUndefined();
-
-    f.frozen.clear();
-    const r2 = await run(f, { account: account() });
-    expect(r2.result.failed).toEqual([]);
-    expect(gaps).toEqual([]);
-    expect(f.apps.some((a) => a.id === "worker-infra-app")).toBe(false);
-    expect(changes(await planOnly(f, account()))).toEqual([]);
   });
 
   it("keeps the Worker's app for a droplet that has no file", async () => {

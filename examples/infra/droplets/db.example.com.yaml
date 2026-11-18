@@ -1,5 +1,6 @@
 # No website: only an SSH route, a Private name and access rules. Frozen: plans show its
-# changes, apply skips them until the owner removes `frozen`.
+# changes, apply skips them until the owner removes `frozen`, except its SSH access (`ssh:`),
+# which is applied to its existing Cloudflare target and ssh- app.
 name: db.example.com
 description: Analytics database (example)
 env: prod

@@ -36,7 +36,7 @@
       "default": false
     },
     "frozen": {
-      "description": "Plans show this droplet's changes, but apply skips them. For droplets that need an owner's go-ahead.",
+      "description": "Plans show this droplet's changes, but apply skips them, with one exception: its SSH access (its ssh list) is applied, as the ssh-access tag on its existing Cloudflare target and the people on its existing ssh- app. For droplets that need an owner's go-ahead.",
       "type": "boolean",
       "default": false
     },

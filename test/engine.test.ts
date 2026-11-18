@@ -1,7 +1,8 @@
 import { describe, expect, it } from "vitest";
 import { KNOWN_AFTER_CREATE } from "../src/core/constants.js";
 import { reportPassed } from "../src/core/report.js";
-import { runEngine, type EngineOptions } from "../src/engine.js";
+import type { ModulePlan, PlanOp } from "../src/core/plan.js";
+import { freezeOps, runEngine, type EngineOptions } from "../src/engine.js";
 import { renderLogLine } from "../src/output/index.js";
 import { fakeModules, type FakeOptions } from "./fakes.js";
 import { EXAMPLE_DIR, observedDroplet } from "./helpers.js";
@@ -272,5 +273,46 @@ describe("engine: real registry without credentials", () => {
     expect(report.stages.find((s) => s.stage === "observe droplets")?.status).toBe("failed");
     expect(reportPassed(report)).toBe(false);
     expect(renderLogLine(report)).toMatch(/^infra check: FAIL \| droplet files 6 \| /);
+  });
+});
+
+describe("freezeOps: the SSH access exception (option b)", () => {
+  const op = (over: Partial<PlanOp> & Pick<PlanOp, "kind" | "key">): PlanOp => ({
+    provider: "cloudflare",
+    module: "cloudflare",
+    action: "update",
+    before: {},
+    after: {},
+    reason: "r",
+    droplet: "db.example.com",
+    ...over,
+  });
+  const frozen = new Set(["db.example.com"]);
+  const plan = (ops: PlanOp[]): ModulePlan => ({ module: "cloudflare", ops, unchanged: 0, diagnostics: [] });
+
+  it("applies a frozen droplet's SSH access updates and freezes everything else", () => {
+    const out = freezeOps(
+      plan([
+        op({ kind: "infra-target", key: "db.example.com", appliesWhenFrozen: true }),
+        op({ kind: "access-app", key: "ssh-db.example.com", appliesWhenFrozen: true }),
+        op({ kind: "access-app", key: "db.example.com/healthcheck" }),
+        op({ kind: "dns-record", key: "A vpc-db.example.com", appliesWhenFrozen: true }),
+        op({ kind: "infra-target", key: "db.example.com (new)", action: "create", appliesWhenFrozen: true }),
+        op({ provider: "digitalocean", module: "droplets", kind: "droplet-tags", key: "db.example.com", appliesWhenFrozen: true }),
+        op({ kind: "infra-target", key: "other.example.com", droplet: "other.example.com" }),
+      ]),
+      frozen,
+    ).ops;
+    expect(out.map((o) => [o.key, o.action])).toEqual([
+      ["db.example.com", "update"],
+      ["ssh-db.example.com", "update"],
+      ["db.example.com/healthcheck", "report"],
+      ["A vpc-db.example.com", "report"],
+      ["db.example.com (new)", "report"],
+      ["db.example.com", "report"],
+      ["other.example.com", "update"],
+    ]);
+    expect(out[0]!.reason).toBe("frozen: only SSH access changes are applied: r");
+    expect(out[2]!.reason).toBe("frozen droplet, would update: r");
   });
 });

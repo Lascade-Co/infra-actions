@@ -96,7 +96,7 @@ description: Storefront
 profile: ubuntu-6               # only for droplets the tool creates; adopted droplets have none
 env: prod                       # prod | staging | internal -> tag env-<env>; new droplets go to that env's region
 deploy: true                    # Deploy target (tag ci-deploy): CI may SSH in with the env's deploy token
-frozen: false                   # true: plans show its changes, apply skips them
+frozen: false                   # true: plans show its changes, apply skips them (except SSH access, below)
 ssh: [admins, someone@example.com]  # required: who may SSH in, always as ubuntu (groups from account.yaml, emails)
 
 web:                            # the site, through the tunnel (replaces web-staff/web-public + web-config.json)
@@ -145,7 +145,9 @@ Only `name` and `ssh` are required. A minimal adopted droplet is `name: build.ex
 
 In Cloudflare, the droplets that resolve to the same people (groups expanded, emails lowercased, sorted, deduplicated) share one Access for Infrastructure app, `infra-sync: SSH <set id>`. Each droplet's infrastructure target carries the tag `ssh-access: <set id>`, and its app selects port 22 of the targets with that tag. The set id is the first 12 hex digits of the SHA-256 of the sorted email list. The droplet's `ssh-` route app lets in the same people. The PR comment shows, per droplet, who gains and who loses SSH, and says once when root login goes away.
 
-This replaces the Worker's single app (`infra-sync: SSH targets`: every admin on every droplet, as `ubuntu` or `root`). The tool owns it by its name prefix and deletes it once every target it covers carries a wanted set's tag. The apply creates the set apps first, then retags the targets (each retag waits for its set's app), then deletes the apps no set wants. A frozen droplet or a droplet that isn't managed this run keeps the app it relies on, with a warning.
+This replaces the Worker's single app (`infra-sync: SSH targets`: every admin on every droplet, as `ubuntu` or `root`). The tool owns it by its name prefix and deletes it once every target it covers carries a wanted set's tag. The apply creates the set apps first, then retags the targets (each retag waits for its set's app), then deletes the apps no set wants. A droplet that isn't managed this run (no file, held) keeps the app it relies on, with a warning.
+
+**Frozen droplets** are the one exception to `frozen`: their SSH access is applied. Only two things change for a frozen droplet: the `ssh-access` tag on its existing infrastructure target (which set's app covers it), and the people on its existing `ssh-` app (the include list of that app's Allow policy for people; its other policies stay as they are). Everything else about a frozen droplet stays plan-only: a new IP or name on its target, its `ssh-` app's CI tokens, DNS, tunnel routes, site and healthcheck apps, DigitalOcean tags, monitors and firewall. Nothing is created for it either: a frozen droplet with no target yet gets none until it is unfrozen. The PR comment marks the applied ones "frozen: only SSH access changes are applied"; the rest shows as "frozen droplet, would …" (the target's and `ssh-` app's other changes as separate items, keyed `… (beyond SSH access)`). So the Worker's single app goes once every droplet, frozen ones included, carries its set's tag.
 
 ### Profiles and account config
 
@@ -257,7 +259,7 @@ A plan is a list of ops:
   before: null,
   after: { content: "10.0.0.11", proxied: false, ttl: 60 },
   reason: "private name for a managed droplet",
-  droplet: "shop.example.com",       // groups the PR comment; frozen droplets turn into report
+  droplet: "shop.example.com",       // groups the PR comment; frozen droplets turn into report (except SSH access)
   pending: true                      // optional: a value is "(known after create)"; apply re-plans first
 }
 ```
@@ -269,6 +271,6 @@ A plan is a list of ops:
 - **Create-only droplets.** The tool creates droplets but never resizes, rebuilds or deletes one.
 - **Ownership by marker.** The tool changes only objects marked `managed-by:infra-sync`; everything else is left alone. Owned monitors are never deleted.
 - **Firewalls are report-only.** `firewall` ops are always `report` until migration Phase 5, and `applyFirewall` refuses anything else.
-- **Frozen droplets** (`frozen: true`) are planned but never applied.
+- **Frozen droplets** (`frozen: true`) are planned but never applied, except their SSH access (the `ssh-access` tag on the existing target and the people on the existing `ssh-` app; see "SSH access").
 - **The loader never follows symlinks.** It reads nothing outside `account.yaml`, `droplets/` and `profiles/`, so a pull request can't make the tool read other files.
 - **Never add real data to this repo.**
