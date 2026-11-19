@@ -15,6 +15,9 @@
 //   --base <dir>   a checkout to compare with (checkChange): the PR's base for check, the commit
 //                  main was at before the push for apply.
 //   --commit <sha> the infra commit this run is pinned to.
+//   --notify <apply|drift>  validate only: the run this validation guards. If the checkout
+//                  doesn't load, post the load-failure alert to Telegram (counts and error codes
+//                  only) as that run would. Needs TELEGRAM_BOT_TOKEN; no other secret is read.
 //
 // DETAIL FILES ARE NEVER UPLOADED (decision 7). The --out and --json files hold real names,
 // hostnames, IPs and ids, and the --json file also the provider ids and the ssh config. A
@@ -37,7 +40,8 @@ import { Secrets } from "./core/secrets.js";
 import { renderDetail, renderLogLine } from "./output/index.js";
 import { reportPassed } from "./core/report.js";
 
-export const USAGE = "usage: infra <validate|check|apply|drift> <infra-dir> [--out <file>] [--json <file>] [--commit <sha>] [--base <dir>]";
+export const USAGE =
+  "usage: infra <validate|check|apply|drift> <infra-dir> [--out <file>] [--json <file>] [--commit <sha>] [--base <dir>] [--notify <apply|drift>]";
 const COMMANDS = ["validate", "check", "apply", "drift"] as const;
 type Command = (typeof COMMANDS)[number];
 
@@ -50,6 +54,7 @@ export interface CliArgs {
   json?: string;
   commit?: string;
   base?: string;
+  notify?: "apply" | "drift";
 }
 
 export function parseArgs(argv: readonly string[]): CliArgs | { error: string } {
@@ -61,7 +66,7 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     const a = rest[i]!;
     if (a.startsWith("--")) {
       const name = a.slice(2);
-      if (!["out", "json", "commit", "base"].includes(name)) return { error: `unknown option --${name}\n${USAGE}` };
+      if (!["out", "json", "commit", "base", "notify"].includes(name)) return { error: `unknown option --${name}\n${USAGE}` };
       const v = rest[++i];
       if (v === undefined) return { error: `--${name} needs a value\n${USAGE}` };
       flags[name] = v;
@@ -70,6 +75,10 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
   if (positional.length !== 1) return { error: USAGE };
   if (flags.base && command !== "check" && command !== "apply") return { error: `--base is only for check and apply\n${USAGE}` };
   if (flags.commit && !/^[0-9a-f]{7,40}$/.test(flags.commit)) return { error: "--commit must be a git sha" };
+  if (flags.notify !== undefined) {
+    if (command !== "validate") return { error: `--notify is only for validate\n${USAGE}` };
+    if (flags.notify !== "apply" && flags.notify !== "drift") return { error: `--notify must be apply or drift\n${USAGE}` };
+  }
   return {
     command: command as Command,
     infraDir: positional[0]!,
@@ -77,6 +86,7 @@ export function parseArgs(argv: readonly string[]): CliArgs | { error: string } 
     ...(flags.json ? { json: flags.json } : {}),
     ...(flags.commit ? { commit: flags.commit } : {}),
     ...(flags.base ? { base: flags.base } : {}),
+    ...(flags.notify ? { notify: flags.notify as "apply" | "drift" } : {}),
   };
 }
 
@@ -105,6 +115,7 @@ export async function main(argv: readonly string[], io: CliIO): Promise<number> 
       infraDir: args.infraDir,
       ...(args.base ? { baseDir: args.base } : {}),
       ...(args.commit ? { infraCommit: args.commit } : {}),
+      ...(args.notify ? { notifyLoadFailure: args.notify } : {}),
       env: io.env,
       fetch: io.fetch,
       ...(io.modules ? { modules: io.modules } : {}),

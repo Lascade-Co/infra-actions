@@ -89,7 +89,9 @@ export async function readInfraDir(dir: string): Promise<{ files: InfraFiles; di
     try {
       await lstat(join(dir, top));
     } catch {
-      if (top !== PROFILES_DIR) diagnostics.push({ level: "error", code: "layout", file: top, message: "missing" });
+      // A missing account.yaml is reported once, by loadInfraFiles (which also sees in-memory
+      // file maps); profiles/ is optional.
+      if (top === DROPLETS_DIR) diagnostics.push({ level: "error", code: "layout", file: top, message: "missing" });
       continue;
     }
     await readOne(top);

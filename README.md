@@ -39,7 +39,7 @@ DigitalOcean droplets ──observe──▶ desired state (files ⨝ droplets, 
 | `apply <dir> [--base <dir>]` | the checkout and every API | the live accounts | the apply summary (`--out`) and Telegram |
 | `drift <dir>` | the checkout and every API | nothing | the drift report (`--out`) and Telegram |
 
-- **`validate`:** load and schema only. Needs no secrets and makes no API calls.
+- **`validate`:** load and schema only. Makes no API calls and needs no secrets. With `--notify apply` or `--notify drift` (the workflows' secret-free first pass), a checkout that doesn't load also gets the load-failure alert on Telegram, as that run would send it; that needs `TELEGRAM_BOT_TOKEN` only.
 - **`check`:** read-only. Runs the checks, observes every API and plans. Its `--out` file is the PR comment, "What happens when this is merged": counts per provider, errors, warnings (awaiting cutover, held droplets and routes the tool doesn't build each have their own heading), the changes grouped by droplet, then the report-only items (the firewall report collapsed per droplet, frozen droplets). `--base` is a checkout of the PR's base: with it, the check also compares the two (a removed droplet file whose droplet still exists is an error, decision 15).
 - **`apply`:** all-or-nothing (decision 16).
   1. Runs everything `check` runs. If any check, read or plan has an error, it writes nothing.
@@ -50,8 +50,9 @@ DigitalOcean droplets ──observe──▶ desired state (files ⨝ droplets, 
 
   `--base` is the commit `main` was at before the push, so the decision-15 check also stops the apply. It catches a removed file only on the merge that removes it.
 - **`drift`:** read-only, daily. Reports droplets with no file, hand-made changes (the plan's ops) and the GitHub token's expiry, and sends the summary to Telegram.
+- **Load failures:** when `apply` or `drift` can't load the infra data (bad YAML, a file failing the schema, `account.yaml` missing), the run fails before any API call and posts one short Telegram message: the run, the short commit and the number of errors per code (`schema 2, layout 1`), never file or droplet names. The chat id is read leniently from `account.yaml` (any file that parses and has `telegram.chat_id`), else from `TELEGRAM_CHAT_ID` in the environment; with neither, the message is skipped.
 
-Options for every command: `--out <file>` (the detail report, markdown), `--json <file>` (the whole report as JSON, including provider ids and the rendered ssh config) and `--commit <sha>` (the `infra` commit the run is pinned to). Nothing is written unless a path is given.
+Options for every command: `--out <file>` (the detail report, markdown), `--json <file>` (the whole report as JSON, including provider ids and the rendered ssh config) and `--commit <sha>` (the `infra` commit the run is pinned to). Nothing is written unless a path is given. `--notify <apply|drift>` is for `validate` only (above).
 
 The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops) and 2 for a usage error.
 
@@ -64,7 +65,8 @@ The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops
 | `INFRA_GH_TOKEN` | sshconfig, drift | the ssh-config branch of the `infra` repo; its expiry is in the drift report |
 | `ONEUPTIME_API_KEY` | oneuptime | monitors (when `account.yaml` has a `oneuptime` section) |
 | `ONEUP_ACCESS_CLIENT_ID`, `ONEUP_ACCESS_CLIENT_SECRET` | oneuptime | the Cloudflare Access service token in front of OneUptime |
-| `TELEGRAM_BOT_TOKEN` | apply, drift | the summary to `account.yaml` `telegram.chat_id`; skipped when either is missing |
+| `TELEGRAM_BOT_TOKEN` | apply, drift, `validate --notify` | the summary to `account.yaml` `telegram.chat_id`; skipped when either is missing |
+| `TELEGRAM_CHAT_ID` | load-failure alert | optional fallback chat id when `account.yaml` is missing or unreadable (not a secret, but keep it out of this repo) |
 
 `validate` needs none. `check`, `apply` and `drift` need all but `TELEGRAM_BOT_TOKEN`; a missing one fails that module's read, and the run fails.
 
@@ -184,8 +186,25 @@ See [`examples/infra/`](examples/infra/) for a complete fake checkout.
 |---|---|---|
 | `test.yml` | push, pull request | `npm ci`, typecheck, tests. No secrets. |
 | `check.yml` | `repository_dispatch` `infra-check` (`pr`, `head_sha`, `base_sha`) from infra's `dispatch-check`, or by hand | fetches the PR head (`refs/pull/<pr>/head`, must equal `head_sha`) and the base, runs `check --base`, posts or updates the one plan comment (`<!-- infra-actions:plan -->`) on the infra PR, and sets the commit status `infra-actions/check` |
-| `apply.yml` | `repository_dispatch` `infra-apply` (`sha`, `before`) from infra's `dispatch-apply`, or by hand | the commit must be on infra's `main`; `validate` without secrets, then `apply --base <before>`. One concurrency group `infra-apply`, never cancelled. Telegram summary from the tool. |
-| `drift.yml` | daily 03:30 UTC, or by hand | `validate` without secrets, then `drift` on infra's `main`. Telegram summary from the tool. |
+| `apply.yml` | `repository_dispatch` `infra-apply` (`sha`, `before`) from infra's `dispatch-apply`, or by hand | first fails unless the repository variable `INFRA_APPLY_ENABLED` is `true` (see "Switch-over"); the commit must be the **head** of infra's `main` (checked before the fetch and again right before the apply, so a stale or out-of-order dispatch applies nothing); `validate --notify apply` with only the Telegram token, then `apply --base <before>`. One concurrency group `infra-apply`, never cancelled. Telegram summary from the tool. |
+| `drift.yml` | daily 03:30 UTC, or by hand | ends early with a success and a one-line notice while infra's `main` has no `account.yaml`; otherwise `validate --notify drift` with only the Telegram token, then `drift` on infra's `main`. Telegram summary from the tool. |
+
+### Switch-over (phase E)
+
+Until the switch-over, an accidental push or merge to infra's `main` must apply nothing. Two things hold it:
+
+- **The apply switch.** `apply.yml` fails loudly, as its first step and before any checkout or secret, unless the repository variable `INFRA_APPLY_ENABLED` of this repo is exactly `true`. It is **not set** before phase E.
+- **No `account.yaml` on infra's `main`.** The exported files live on a branch with a draft PR until phase E; `drift.yml` skips quietly until `account.yaml` reaches `main`.
+
+At the switch-over, in this order:
+
+1. Announce the freeze on droplet creation and tag changes; stop the Worker's 10-minute sync and its manual `/run`.
+2. Re-export from the now-stable state; the check on the export PR must show only the intended changes.
+3. Set the variable: `gh variable set INFRA_APPLY_ENABLED --body true -R Lascade-Co/infra-actions` (Settings → Secrets and variables → Actions → Variables).
+4. Merge the export PR into infra's `main`. Its push dispatches the first apply; read its Telegram summary.
+5. End the freeze.
+
+To stop all applies again at any time, delete the variable or set it to anything but `true`.
 
 Rules kept by all of them (decision 7):
 

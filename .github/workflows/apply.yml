@@ -2,8 +2,14 @@
 #
 # Started by infra's dispatch-apply workflow on every push to main (repository_dispatch
 # infra-apply, payload sha and before) or by an admin by hand. Runs this repo's main only, one
-# apply at a time, never cancelled. The commit must be on infra's main. The tool is
-# all-or-nothing and sends the Telegram summary itself.
+# apply at a time, never cancelled. The tool is all-or-nothing and sends the Telegram summary
+# itself.
+#
+# Two gates before anything is fetched or any token is used:
+#   - the switch: the repository variable INFRA_APPLY_ENABLED must be exactly "true". Until the
+#     switch-over (phase E) it is unset, so a push or merge to infra's main applies nothing;
+#   - the tip: the dispatched commit must be the current head of infra's main (checked again
+#     right before the apply), so a stale or out-of-order dispatch never applies an older state.
 #
 # Decision 7: the log shows counts and pass/fail only. The report stays in $RUNNER_TEMP (outside
 # the workspace), is never uploaded, cached or put in the job summary, and is deleted at the end.
@@ -37,6 +43,17 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
+      # First step, before any checkout or secret: fails the run loudly when applies are off.
+      - name: Applies must be switched on (INFRA_APPLY_ENABLED)
+        env:
+          ENABLED: ${{ vars.INFRA_APPLY_ENABLED }}
+        run: |
+          if [ "$ENABLED" != "true" ]; then
+            echo "::error::Applies are switched off: the repository variable INFRA_APPLY_ENABLED is not \"true\". Nothing was fetched or applied. It is set at the switch-over (phase E); see the README."
+            exit 1
+          fi
+          echo "Applies are switched on."
+
       - name: Validate inputs
         id: in
         env:
@@ -67,17 +84,11 @@ jobs:
           npm ci --no-audit --no-fund
           npm run build
 
-      - name: The commit must be on infra's main
+      - name: The commit must be the head of infra's main
         env:
           GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
           SHA: ${{ steps.in.outputs.sha }}
-        run: |
-          # compare <sha>...main: "identical" or "ahead" means main contains the commit.
-          status=$(gh api "repos/Lascade-Co/infra/compare/$SHA...main" --jq .status)
-          case "$status" in
-            identical | ahead) echo "The commit is on infra's main ($status)." ;;
-            *) echo "::error::The commit is not on infra's main ($status); nothing applied."; exit 1 ;;
-          esac
+        run: .github/scripts/infra-main-head.sh "$SHA"
 
       - name: Fetch the commit
         env:
@@ -92,18 +103,27 @@ jobs:
           BEFORE: ${{ steps.in.outputs.before }}
         run: .github/scripts/fetch-infra.sh "$RUNNER_TEMP/infra-base" "$BEFORE" "$BEFORE"
 
-      # No secrets here: if the checkout doesn't load or fails the schema, the apply step below
-      # never starts, so no token reaches the tool and no API is called.
-      - name: Validate (no secrets, no API calls)
+      # No API tokens here: if the checkout doesn't load or fails the schema, the apply step below
+      # never starts, so no API token reaches the tool and no API is called. Only the Telegram
+      # bot token, for the load-failure alert (counts and error codes, no names).
+      - name: Validate (no API calls; Telegram alert on failure)
         env:
           SHA: ${{ steps.in.outputs.sha }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           rc=0
-          node dist/cli.js validate "$RUNNER_TEMP/infra-head" --commit "$SHA" --out "$RUNNER_TEMP/infra-validate.md" || rc=$?
+          node dist/cli.js validate "$RUNNER_TEMP/infra-head" --notify apply --commit "$SHA" --out "$RUNNER_TEMP/infra-validate.md" || rc=$?
           if [ "$rc" != 0 ]; then
             echo "::error::The infra checkout does not load or fails the schema. Apply not run: no API was called and nothing was written."
             exit 1
           fi
+
+      # Again, right before the first write: main may have moved while this run waited or built.
+      - name: Still the head of infra's main
+        env:
+          GH_TOKEN: ${{ secrets.INFRA_GH_TOKEN }}
+          SHA: ${{ steps.in.outputs.sha }}
+        run: .github/scripts/infra-main-head.sh "$SHA"
 
       - name: Apply
         id: apply

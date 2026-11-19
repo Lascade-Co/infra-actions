@@ -1,5 +1,7 @@
 # Daily drift report, read-only: droplets with no file, hand-made changes, the GitHub token's
 # expiry. The tool sends the summary to Telegram; the log shows counts and pass/fail only.
+# Until infra's main has an account.yaml (it arrives at the switch-over, phase E) the run ends
+# early with a success and a one-line note.
 name: drift
 
 on:
@@ -41,19 +43,30 @@ jobs:
         run: |
           .github/scripts/fetch-infra.sh "$RUNNER_TEMP/infra-head" refs/heads/main
           echo "sha=$(git -C "$RUNNER_TEMP/infra-head" rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          if [ -f "$RUNNER_TEMP/infra-head/account.yaml" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::infra's main has no account.yaml yet (it arrives at the switch-over): drift skipped."
+          fi
 
-      - name: Validate (no secrets, no API calls)
+      # No API tokens here; only the Telegram bot token, for the load-failure alert (counts and
+      # error codes, no names).
+      - name: Validate (no API calls; Telegram alert on failure)
+        if: steps.head.outputs.ready == 'true'
         env:
           SHA: ${{ steps.head.outputs.sha }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
         run: |
           rc=0
-          node dist/cli.js validate "$RUNNER_TEMP/infra-head" --commit "$SHA" --out "$RUNNER_TEMP/infra-validate.md" || rc=$?
+          node dist/cli.js validate "$RUNNER_TEMP/infra-head" --notify drift --commit "$SHA" --out "$RUNNER_TEMP/infra-validate.md" || rc=$?
           if [ "$rc" != 0 ]; then
             echo "::error::The infra checkout does not load or fails the schema. Drift not run: no API was called."
             exit 1
           fi
 
       - name: Drift
+        if: steps.head.outputs.ready == 'true'
         env:
           SHA: ${{ steps.head.outputs.sha }}
           CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}

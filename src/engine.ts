@@ -23,6 +23,7 @@ import { isChange, type ModulePlan, type PlanOp, type Provider, type RunContext,
 import { newReport, reportPassed, type RunReport } from "./core/report.js";
 import { Secrets } from "./core/secrets.js";
 import { createModules, type Modules } from "./registry.js";
+import { lenientChatId, renderLoadFailure, sendLoadFailure } from "./output/load-alert.js";
 
 export interface EngineOptions {
   mode: RunMode | "validate";
@@ -40,6 +41,12 @@ export interface EngineOptions {
   sleep?: (ms: number) => Promise<void>;
   /** Injectable for tests; defaults to the registry. */
   modules?: (ctx: RunContext) => Modules;
+  /**
+   * validate only: the run this validation guards (the workflows validate without the API
+   * tokens first). When the checkout doesn't load, send the load-failure alert to Telegram as
+   * that run would. apply and drift send it themselves.
+   */
+  notifyLoadFailure?: "apply" | "drift";
 }
 
 const errText = (e: unknown): string => (e instanceof Error ? `${e.name}: ${e.message}` : String(e));
@@ -107,12 +114,25 @@ export async function runEngine(opts: EngineOptions): Promise<RunReport> {
     return report;
   };
 
-  // 1. Load and validate the checkout.
+  // 1. Load and validate the checkout. An apply or drift run that can't load it (or a validate
+  //    that guards one) says so on Telegram: counts and error codes only, no names.
+  const alertRun = opts.mode === "apply" || opts.mode === "drift" ? opts.mode : opts.notifyLoadFailure;
+  const loadFailed = async (internalError: boolean) => {
+    if (!alertRun) return finish();
+    const text = renderLoadFailure(alertRun, report.diagnostics, opts.infraCommit, internalError);
+    const chatId = await lenientChatId(opts.infraDir, opts.env);
+    if (!chatId || !secrets.has("TELEGRAM_BOT_TOKEN")) {
+      stages.skip("notify telegram", "no telegram chat id or no TELEGRAM_BOT_TOKEN");
+      return finish();
+    }
+    await stages.run("notify telegram", () => sendLoadFailure({ fetch: opts.fetch, secrets, chatId, text }));
+    return finish();
+  };
   const loaded = await stages.run("load", () => loadInfraDir(opts.infraDir));
-  if (!loaded.ok) return finish();
+  if (!loaded.ok) return loadFailed(true);
   report.diagnostics.push(...loaded.value.diagnostics);
   const config = loaded.value.config;
-  if (!config) return finish();
+  if (!config) return loadFailed(false);
   report.dropletFiles = config.droplets.length;
   if (opts.mode === "validate") return finish();
   const mode = opts.mode;
