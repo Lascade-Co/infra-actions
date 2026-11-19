@@ -76,7 +76,7 @@ The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops
 | `ONEUPTIME_API_KEY` | oneuptime | monitors (when `account.yaml` has a `oneuptime` section) |
 | `ONEUP_ACCESS_CLIENT_ID`, `ONEUP_ACCESS_CLIENT_SECRET` | oneuptime | the Cloudflare Access service token in front of OneUptime |
 | `TELEGRAM_BOT_TOKEN` | apply, drift, `validate --notify` | the summary to `account.yaml` `telegram.chat_id`; skipped when either is missing |
-| `TELEGRAM_CHAT_ID` | load-failure alert | optional fallback chat id when `account.yaml` is missing or unreadable; the workflows pass the repository variable `TELEGRAM_CHAT_ID` (not a secret, but keep it out of this repo's files) |
+| `TELEGRAM_CHAT_ID` | load-failure alert | optional fallback chat id when `account.yaml` is missing or unreadable; the workflows pass the repository **secret** `TELEGRAM_CHAT_ID` (a secret because GitHub prints each step's env in the public log and masks only secrets) |
 
 `validate` needs none. `check`, `apply` and `drift` need all but `TELEGRAM_BOT_TOKEN`; a missing one fails that module's read, and the run fails.
 
@@ -196,8 +196,8 @@ See [`examples/infra/`](examples/infra/) for a complete fake checkout.
 |---|---|---|
 | `test.yml` | push, pull request | `npm ci`, typecheck, tests. No secrets. |
 | `check.yml` | `repository_dispatch` `infra-check` (`pr`, `head_sha`, `base_sha`) from infra's `dispatch-check`, or by hand | fetches the PR head (`refs/pull/<pr>/head`, must equal `head_sha`) and the base, runs `check --base`, posts or updates the one plan comment (`<!-- infra-actions:plan -->`) on the infra PR, and sets the commit status `infra-actions/check` |
-| `apply.yml` | `repository_dispatch` `infra-apply` (`sha`, `before`) from infra's `dispatch-apply`, or by hand | first fails unless the repository variable `INFRA_APPLY_ENABLED` is `true` (see "Switch-over"); the commit must be the **head** of infra's `main` (checked before the fetch and again right before the apply, so a stale or out-of-order dispatch applies nothing); `validate --notify apply` with only the Telegram token, then `apply --base <before>`. One concurrency group `infra-apply`, never cancelled. Telegram summary from the tool. |
-| `drift.yml` | daily 03:30 UTC, or by hand | ends early with a success and a one-line notice while infra's `main` has no `account.yaml`; otherwise `validate --notify drift` with only the Telegram token, then `drift` on infra's `main`. Telegram summary from the tool. |
+| `apply.yml` | `repository_dispatch` `infra-apply` (`sha`, `before`) from infra's `dispatch-apply`, or by hand | first fails unless the repository variable `INFRA_APPLY_ENABLED` is `true` (see "Switch-over"); the commit must be the **head** of infra's `main` (checked before the fetch and again right before the apply, so a stale or out-of-order dispatch applies nothing); `validate --notify apply` with only the Telegram token and chat, then `apply --base <before>`. One concurrency group `infra-apply`, never cancelled. Telegram summary from the tool. |
+| `drift.yml` | daily 03:30 UTC, or by hand | ends early with a success and a one-line notice while infra's `main` has no `account.yaml`; otherwise `validate --notify drift` with only the Telegram token and chat, then `drift` on infra's `main`. Telegram summary from the tool. |
 
 ### Switch-over (phase E)
 

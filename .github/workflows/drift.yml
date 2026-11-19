@@ -57,8 +57,9 @@ jobs:
         env:
           SHA: ${{ steps.head.outputs.sha }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
-          # Fallback chat for the alert when account.yaml itself can't be read (optional variable).
-          TELEGRAM_CHAT_ID: ${{ vars.TELEGRAM_CHAT_ID }}
+          # Fallback chat for the alert when account.yaml itself can't be read. A secret, not a
+          # variable: GitHub prints a step's env in the public log and masks only secrets.
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           rc=0
           node dist/cli.js validate "$RUNNER_TEMP/infra-head" --notify drift --commit "$SHA" --out "$RUNNER_TEMP/infra-validate.md" || rc=$?

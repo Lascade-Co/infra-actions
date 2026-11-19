@@ -41,11 +41,11 @@ describe("apply.yml", () => {
     expect(heads[1]!).toBe(names.indexOf("Apply") - 1);
   });
 
-  it("validates with only the Telegram token, and asks for the load alert", async () => {
+  it("validates with only the Telegram token and chat (both secrets: step env is printed in the log), and asks for the load alert", async () => {
     const v = (await steps("apply.yml")).find((s) => s.name?.startsWith("Validate ("))!;
-    expect(secretsOf(v)).toEqual(["${{ secrets.TELEGRAM_BOT_TOKEN }}"]);
+    expect(secretsOf(v)).toEqual(["${{ secrets.TELEGRAM_BOT_TOKEN }}", "${{ secrets.TELEGRAM_CHAT_ID }}"]);
     expect(v.run).toContain("--notify apply");
-    expect(v.env?.TELEGRAM_CHAT_ID).toBe("${{ vars.TELEGRAM_CHAT_ID }}");
+    expect(v.env?.TELEGRAM_CHAT_ID).toBe("${{ secrets.TELEGRAM_CHAT_ID }}");
   });
 });
 
@@ -58,8 +58,8 @@ describe("drift.yml", () => {
     for (const name of ["Drift"]) expect(all.find((s) => s.name === name)!.if).toBe("steps.head.outputs.ready == 'true'");
     const v = all.find((s) => s.name?.startsWith("Validate ("))!;
     expect(v.if).toBe("steps.head.outputs.ready == 'true'");
-    expect(secretsOf(v)).toEqual(["${{ secrets.TELEGRAM_BOT_TOKEN }}"]);
+    expect(secretsOf(v)).toEqual(["${{ secrets.TELEGRAM_BOT_TOKEN }}", "${{ secrets.TELEGRAM_CHAT_ID }}"]);
     expect(v.run).toContain("--notify drift");
-    expect(v.env?.TELEGRAM_CHAT_ID).toBe("${{ vars.TELEGRAM_CHAT_ID }}");
+    expect(v.env?.TELEGRAM_CHAT_ID).toBe("${{ secrets.TELEGRAM_CHAT_ID }}");
   });
 });
