@@ -61,6 +61,8 @@ import {
   type SshAccessView,
   type TargetBody,
   targetBody,
+  targetIp,
+  cleanTargetIp,
   type VpcBody,
   vpcBody,
   type WebAppBody,
@@ -601,7 +603,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
             (t) => t.ip?.ipv4?.ip_addr === c.privateIp && !unique.some((u) => lc(u.name) === lc(t.hostname)) && !heldNames.has(t.hostname),
           ));
     if (existingT) claimedTargetIds.add(existingT.id);
-    const tBody = targetBody(c.name, c.privateIp, setId, existingT?.tags);
+    const tBody = targetBody(c.name, c.privateIp, setId, existingT?.tags, existingT?.ip);
     const target: HostPlan["target"] = !existingT
       ? { op: "create", body: tBody }
       : existingT.ip?.ipv4?.ip_addr !== c.privateIp || existingT.hostname !== c.name || !sameTags(existingT.tags, tBody.tags)
@@ -611,7 +613,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     // A frozen droplet's SSH access is the one thing applied for it (option b): its target's tag only.
     const frozenTarget =
       c.frozen && existingT && !sameTags(existingT.tags, tBody.tags)
-        ? { existingId: existingT.id, existing: existingT, body: { hostname: existingT.hostname, ip: existingT.ip, tags: tBody.tags } as TargetBody }
+        ? { existingId: existingT.id, existing: existingT, body: { hostname: existingT.hostname, ip: existingT.ip?.ipv4?.ip_addr ? targetIp(existingT.ip.ipv4.ip_addr, existingT.ip) : cleanTargetIp(existingT.ip), tags: tBody.tags } as unknown as TargetBody }
         : undefined;
     const hp: HostPlan = {
       name: c.name,

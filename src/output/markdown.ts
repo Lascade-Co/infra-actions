@@ -289,8 +289,8 @@ function firewallSection(doc: Doc, ops: PlanOp[]) {
   doc.always("", "</details>");
 }
 
+/** The small report-only sections. The firewall report is rendered last (firewallSection). */
 function reportOnlySections(doc: Doc, ops: PlanOp[]) {
-  firewallSection(doc, ops);
   collapsed(
     doc,
     "Frozen droplets: changes shown, never applied",
@@ -349,6 +349,9 @@ export function renderPrComment(r: RunReport): string {
   opsByDroplet(doc, "Changes the apply will make", changes, { provider: true });
   reportOnlySections(doc, ops);
   unmanagedSection(doc, r, "Droplets in DigitalOcean that have no droplet file. The tool never touches them; add a file to manage one.");
+  // Last: it is by far the largest section, so when the comment hits its size limit only firewall
+  // detail is cut, never a change, a frozen or other report-only item, or a droplet with no file.
+  firewallSection(doc, ops);
   return doc.text();
 }
 
@@ -388,6 +391,7 @@ export function renderApplySummary(r: RunReport): string {
   }
   reportOnlySections(doc, ops);
   unmanagedSection(doc, r, "Droplets with no droplet file. Left alone.");
+  firewallSection(doc, ops);
   return doc.text();
 }
 
@@ -444,5 +448,6 @@ export function renderDriftReport(r: RunReport): string {
   });
   warningsSections(doc, r);
   reportOnlySections(doc, ops);
+  firewallSection(doc, ops);
   return doc.text();
 }

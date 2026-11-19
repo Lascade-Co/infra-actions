@@ -51,7 +51,15 @@ describe("renderPrComment", () => {
     expect(md.indexOf("fw-db inbound tcp/5432")).toBeGreaterThan(fw);
     expect(md).toContain("<details><summary>Frozen droplets: changes shown, never applied (1)</summary>");
     expect(md).toContain("<details><summary>Other report-only items, never applied (1)</summary>");
-    const changes = md.slice(md.indexOf("### Changes the apply will make"), fw);
+    // The firewall report is last, so truncation only ever cuts firewall detail.
+    const frozen = md.indexOf("<details><summary>Frozen droplets");
+    const other = md.indexOf("<details><summary>Other report-only items");
+    expect(frozen).toBeGreaterThan(md.indexOf("### Changes the apply will make (7)"));
+    expect(fw).toBeGreaterThan(frozen);
+    expect(fw).toBeGreaterThan(other);
+    const noFile = md.indexOf("<details><summary>Droplets with no file, left alone");
+    if (noFile > -1) expect(fw).toBeGreaterThan(noFile);
+    const changes = md.slice(md.indexOf("### Changes the apply will make"), frozen);
     expect(changes).not.toContain("data.example.com");
     expect(changes).not.toContain("old.example.com");
   });

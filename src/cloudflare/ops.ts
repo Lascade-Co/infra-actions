@@ -15,7 +15,7 @@ import type { DesiredState } from "../core/desired.js";
 import type { Json, PlanOp } from "../core/plan.js";
 import { flattenName } from "../core/naming.js";
 import { LEGACY_INFRA_APP_NAME } from "../core/constants.js";
-import { appDestinations, appDomains, lc, normPolicies, webAppKind } from "./bodies.js";
+import { appDestinations, appDomains, cleanTargetIp, lc, normPolicies, webAppKind } from "./bodies.js";
 import { mergeIngress, rulesFor, type UpsertTarget } from "./ingress.js";
 import type { Plan, Snapshot } from "./plan.js";
 import type { AccessApp, AccessPolicy, DnsRecord, IngressRule, InfraTarget, ReadError, TunnelConfiguration } from "./types.js";
@@ -81,7 +81,7 @@ function appView(a: AccessApp): Json {
   });
 }
 const dnsView = (r: DnsRecord): Json => j({ type: r.type, name: r.name, content: r.content, proxied: r.proxied ?? null, ttl: r.ttl ?? null, comment: r.comment ?? null });
-const targetView = (t: InfraTarget): Json => j({ hostname: t.hostname, ip: t.ip, tags: t.tags ?? {} });
+const targetView = (t: InfraTarget): Json => j({ hostname: t.hostname, ip: cleanTargetIp(t.ip), tags: t.tags ?? {} });
 
 export interface OpsResult {
   ops: PlanOp[];

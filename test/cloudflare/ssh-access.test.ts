@@ -198,6 +198,34 @@ describe("migration from the Worker's single app", () => {
     expect(changes(await planOnly(f, account()))).toEqual([]);
   });
 
+  it("a retag keeps the target's virtual network and only changes its tags (the PUT replaces the whole target)", async () => {
+    const f = await workerState();
+    const VNET = "00000000-0000-4000-8000-0000000000aa";
+    // As the API returns them: the virtual network on ipv4, ipv6 null.
+    for (const t of f.targets) t.ip = { ipv4: { ip_addr: t.ip.ipv4!.ip_addr!, virtual_network_id: VNET }, ipv6: null } as unknown as typeof t.ip;
+    const plan = await planOnly(f, account());
+    const retags = plan.ops.filter((o) => o.kind === "infra-target");
+    expect(retags).toHaveLength(3);
+    for (const o of retags) {
+      const before = o.before as { ip: unknown; hostname: string };
+      const after = o.after as { ip: unknown; hostname: string; tags: Record<string, string> };
+      expect(after.ip).toEqual(before.ip);
+      expect(after.ip).toEqual({ ipv4: { ip_addr: expect.any(String), virtual_network_id: VNET } });
+      expect(after.tags["ssh-access"]).toMatch(/^[0-9a-f]{12}$/);
+    }
+    await run(f, { account: account() });
+    for (const t of f.targets) expect(t.ip.ipv4?.virtual_network_id).toBe(VNET);
+  });
+
+  it("a target whose private IP changed goes to the default virtual network, as the Worker did", async () => {
+    const f = await workerState();
+    const t = target(f, "a.example.com");
+    t.ip = { ipv4: { ip_addr: "10.0.0.99", virtual_network_id: "00000000-0000-4000-8000-0000000000aa" } };
+    const plan = await planOnly(f, account());
+    const op = plan.ops.find((o) => o.kind === "infra-target" && o.key === "a.example.com")!;
+    expect((op.after as { ip: unknown }).ip).toEqual({ ipv4: { ip_addr: "10.0.0.2" } });
+  });
+
   it("the PR comment shows each droplet's SSH access change and the root removal once", async () => {
     const f = await workerState();
     f.ssh["c.example.com"] = ["admins", "devs"];

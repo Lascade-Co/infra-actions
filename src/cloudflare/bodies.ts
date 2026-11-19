@@ -92,10 +92,14 @@ export function appDestinations(a: AccessApp): string[] {
 
 // ---------- bodies ----------
 
+export interface TargetIp {
+  /** virtual_network_id omitted => default virtual network */
+  ipv4: { ip_addr: string; virtual_network_id?: string };
+  ipv6?: { ip_addr: string; virtual_network_id?: string };
+}
 export interface TargetBody {
   hostname: string;
-  /** virtual_network_id omitted => default virtual network */
-  ip: { ipv4: { ip_addr: string } };
+  ip: TargetIp;
   tags: Record<string, string>;
 }
 export interface AppBody {
@@ -147,9 +151,36 @@ export interface WebAppBody {
  * `setId`: the droplet's SSH access set (sshAccessSetId), as the tag the set's infrastructure app
  * selects. Tags the tool doesn't manage (other keys on an existing target) are kept.
  */
-export function targetBody(name: string, ip: string, setId: string, existingTags: Record<string, string> = {}): TargetBody {
+export function targetBody(
+  name: string,
+  ip: string,
+  setId: string,
+  existingTags: Record<string, string> = {},
+  existingIp?: InfraTarget["ip"],
+): TargetBody {
   const kept = Object.fromEntries(Object.entries(existingTags).filter(([k]) => k !== TARGET_TAG_KEY && k !== SSH_ACCESS_TAG_KEY));
-  return { hostname: name, ip: { ipv4: { ip_addr: ip } }, tags: { ...kept, [TARGET_TAG_KEY]: TARGET_TAG_VALUE, [SSH_ACCESS_TAG_KEY]: setId } };
+  return { hostname: name, ip: targetIp(ip, existingIp), tags: { ...kept, [TARGET_TAG_KEY]: TARGET_TAG_VALUE, [SSH_ACCESS_TAG_KEY]: setId } };
+}
+
+/**
+ * The target's ip for a create or a PUT. The update is a full replace, so when the private IP is
+ * unchanged the existing virtual network (and an IPv6 address, if the target has one) are carried
+ * over: a retag must not move the target to another virtual network. A new IP goes to the default
+ * virtual network, as the Worker did.
+ */
+export function targetIp(ip: string, existing?: InfraTarget["ip"]): TargetIp {
+  const v4 = existing?.ipv4;
+  if (!v4 || v4.ip_addr !== ip) return { ipv4: { ip_addr: ip } };
+  const v6 = existing?.ipv6;
+  return {
+    ipv4: { ip_addr: ip, ...(v4.virtual_network_id ? { virtual_network_id: v4.virtual_network_id } : {}) },
+    ...(v6?.ip_addr ? { ipv6: { ip_addr: v6.ip_addr, ...(v6.virtual_network_id ? { virtual_network_id: v6.virtual_network_id } : {}) } } : {}),
+  };
+}
+
+/** A target's ip as read, without the null entries the API returns (ipv6: null). */
+export function cleanTargetIp(ip: InfraTarget["ip"] | undefined): Record<string, unknown> {
+  return Object.fromEntries(Object.entries(ip ?? {}).filter(([, v]) => v !== null && v !== undefined));
 }
 
 /** Tags compared by key and value, order ignored. */
