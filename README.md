@@ -38,6 +38,7 @@ DigitalOcean droplets ──observe──▶ desired state (files ⨝ droplets, 
 | `check <dir> [--base <dir>]` | the checkout and every API | nothing | the PR comment (`--out`) |
 | `apply <dir> [--base <dir>]` | the checkout and every API | the live accounts | the apply summary (`--out`) and Telegram |
 | `drift <dir>` | the checkout and every API | nothing | the drift report (`--out`) and Telegram |
+| `export <out-dir> ...` | the Worker's settings, DigitalOcean (and Cloudflare zones) | `account.yaml` and `droplets/` in `<out-dir>` | the notes (`--out`) |
 
 - **`validate`:** load and schema only. Makes no API calls and needs no secrets. With `--notify apply` or `--notify drift` (the workflows' secret-free first pass), a checkout that doesn't load also gets the load-failure alert on Telegram, as that run would send it; that needs `TELEGRAM_BOT_TOKEN` only.
 - **`check`:** read-only. Runs the checks, observes every API and plans. Its `--out` file is the PR comment, "What happens when this is merged": counts per provider, errors, warnings (awaiting cutover, held droplets and routes the tool doesn't build each have their own heading), the changes grouped by droplet, then the report-only items (the firewall report collapsed per droplet, frozen droplets). `--base` is a checkout of the PR's base: with it, the check also compares the two (a removed droplet file whose droplet still exists is an error, decision 15).
@@ -50,6 +51,15 @@ DigitalOcean droplets ──observe──▶ desired state (files ⨝ droplets, 
 
   `--base` is the commit `main` was at before the push, so the decision-15 check also stops the apply. It catches a removed file only on the merge that removes it.
 - **`drift`:** read-only, daily. Reports droplets with no file, hand-made changes (the plan's ops) and the GitHub token's expiry, and sends the summary to Telegram.
+- **`export`** (phase D, read-only): writes the infra-sync Worker's live state as `account.yaml` plus one droplet file per droplet the Worker manages (its own rule: a lowercase name under an account zone, in a region with a tunnel). Droplets with no tags at all are left out unless `--include-untagged`. See [`src/export/run.ts`](src/export/run.ts) for the inputs:
+
+  ```sh
+  node dist/cli.js export <infra-checkout> --worker <wrangler.toml> --web-config <web-config.json> \
+    [--droplets <doctl compute droplet list -o json>] [--account-base <account.yaml>] \
+    [--drafts <allow/swarm drafts.yaml>] [--frozen <name,...>] [--include-untagged] --out <notes.md>
+  ```
+
+  Each file gets `env` from the `env-*` tag, `deploy` from `ci-deploy`, `web:` from `web-staff`/`web-public` plus the site's `web-config.json` entry, and `ssh: [admins]` (the group holding `SSH_ADMIN_EMAILS`). Anything that can't be written without changing a tag (a `web-config.json` entry on a droplet with no web tag, both web tags, `ci-deploy` without `env`) is left out and listed in the notes, and so is any draft `allow:`/`swarm:` entry the schema or the checks reject. All inputs and outputs hold real data: keep them out of this repo.
 - **Load failures:** when `apply` or `drift` can't load the infra data (bad YAML, a file failing the schema, `account.yaml` missing), the run fails before any API call and posts one short Telegram message: the run, the short commit and the number of errors per code (`schema 2, layout 1`), never file or droplet names. The chat id is read leniently from `account.yaml` (any file that parses and has `telegram.chat_id`), else from `TELEGRAM_CHAT_ID` in the environment; with neither, the message is skipped.
 
 Options for every command: `--out <file>` (the detail report, markdown), `--json <file>` (the whole report as JSON, including provider ids and the rendered ssh config) and `--commit <sha>` (the `infra` commit the run is pinned to). Nothing is written unless a path is given. `--notify <apply|drift>` is for `validate` only (above).
@@ -250,7 +260,8 @@ src/firewall/        B3  DigitalOcean firewall plan (report-only)
 src/droplets/        B4  droplet creation (create-only) and tags
 src/oneuptime/       B5  OneUptime monitors
 src/sshconfig/       B6  ssh config on the ssh-config branch
-src/output/          B7  PR comment, log line, Telegram, drift report
+src/output/          B7  PR comment, log line, Telegram, drift report, load-failure alert
+src/export/          phase D export of the Worker's live state
 examples/infra/      a fake infra checkout
 test/                vitest; per-module tests go in test/<module>/
 ```

@@ -6,6 +6,8 @@
 //   infra apply    <infra-dir> [--base <dir>]  plan, then apply (the only command that writes);
 //                                           all-or-nothing: any error and nothing is written
 //   infra drift    <infra-dir>              read-only: droplets with no file, hand-made changes
+//   infra export   <out-dir> --worker ... --web-config ...   phase D: the Worker's live state ->
+//                                           account.yaml + droplet files (src/export/run.ts)
 //
 // Options:
 //   --out <file>   the detail report (markdown): the PR comment for check, the apply summary,
@@ -39,6 +41,7 @@ import { runEngine, type EngineOptions } from "./engine.js";
 import { Secrets } from "./core/secrets.js";
 import { renderDetail, renderLogLine } from "./output/index.js";
 import { reportPassed } from "./core/report.js";
+import { runExport } from "./export/run.js";
 
 export const USAGE =
   "usage: infra <validate|check|apply|drift> <infra-dir> [--out <file>] [--json <file>] [--commit <sha>] [--base <dir>] [--notify <apply|drift>]";
@@ -103,6 +106,7 @@ export interface CliIO {
 
 /** Returns the exit code: 0 pass, 1 fail, 2 usage. */
 export async function main(argv: readonly string[], io: CliIO): Promise<number> {
+  if (argv[0] === "export") return runExport(argv.slice(1), io);
   const args = parseArgs(argv);
   if ("error" in args) {
     io.stderr(args.error);
