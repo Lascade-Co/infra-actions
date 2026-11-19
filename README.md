@@ -81,7 +81,7 @@ The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops
 
 | Variable | Used by | For |
 |---|---|---|
-| `CF_API_TOKEN` | cloudflare | DNS, tunnels, Access apps, SSH targets |
+| `CF_API_TOKEN` | cloudflare | DNS, tunnels, Access apps, SSH targets, WAF custom rules (permissions below) |
 | `DO_TOKEN` | droplets, firewall | droplets (create, read), tags (read, and `tag:create`: a new droplet is created with its env's firewall tag), firewalls (read) |
 | `INFRA_GH_TOKEN` | sshconfig, drift | the ssh-config branch of the `infra` repo; its expiry is in the drift report |
 | `ONEUPTIME_API_KEY` | oneuptime | monitors (when `account.yaml` has a `oneuptime` section) |
@@ -91,13 +91,24 @@ The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops
 
 `validate` needs none. `check`, `apply` and `drift` need all but `TELEGRAM_BOT_TOKEN`; a missing one fails that module's read, and the run fails.
 
+**Cloudflare token permissions** (one token, decision 14; `check` and `drift` only read with it). API names; the dashboard shows "Write" as "Edit". The rows above Zone WAF are carried over from the infra-sync Worker's setup, which noted that the OpenAPI schema names no group for infrastructure targets (Zero Trust Write comes from a changelog):
+
+| Scope | Permission | For |
+|---|---|---|
+| Account | Access: Apps and Policies Write | Access apps (sites, `ssh-`, tunnel routes, SSH access sets), inline policies |
+| Account | Zero Trust Write | infrastructure targets |
+| Account | Cloudflare Tunnel Write | tunnel configurations (read and written as one document) |
+| Zone, all zones | DNS Write | `ssh-`, `vpc-` and site records; reading every record |
+| Zone, all zones | Zone Read | listing the zones (and their plan, for the WAF rule limit) |
+| Zone, all zones | **Zone WAF Write** ("Zone WAF: Edit" in the dashboard) | the WAF custom rule that blocks encoded slashes (decision 21): reading each zone's `http_request_firewall_custom` entry point ruleset, adding, changing and deleting the tool's one rule. Cloudflare's docs list Zone WAF Read or Write for the read and Zone WAF Write for the writes ([custom rulesets](https://developers.cloudflare.com/waf/custom-rules/custom-rulesets/), [permission names](https://developers.cloudflare.com/fundamentals/api/reference/permissions/)). Without it every zone's WAF read fails: an error in the check, and nothing is applied. |
+
 ## Modules
 
 | Module | What it manages | Notes |
 |---|---|---|
 | `checks` (B2) | rules beyond the schema: names in an account zone, references between files, who-lists (groups, service tokens, email domain, web-only entries), UDP routes, swarm rules, removed files | pure; errors block check and apply |
 | `droplets` (B4) | creates droplets from profiles, with the env's old firewall tag | create-only; never writes a tag on an existing droplet (decision 20) |
-| `cloudflare` (B1) | SSH targets and one SSH Access app per access set, private (`vpc-`) names, sites (DNS, tunnel routes, Access apps), `allow.tunnel` routes | port of the Worker's reconcile; delete guard rails; UDP routes and port ranges are reported, not built |
+| `cloudflare` (B1) | SSH targets and one SSH Access app per access set, private (`vpc-`) names, sites (DNS, tunnel routes, Access apps), `allow.tunnel` routes, one WAF custom rule per zone that blocks encoded slashes (decision 21) | port of the Worker's reconcile; delete guard rails; UDP routes and port ranges are reported, not built |
 | `firewall` (B3) | what `allow:` and `swarm:` imply for the DigitalOcean firewalls | report-only until migration Phase 5 |
 | `oneuptime` (B5) | one HTTP monitor per site hostname (or per `monitors:` entry) | down only after 3 failing minutes; owned monitors are never deleted, only reported |
 | `sshconfig` (B6) | the generated ssh config and its README on the `ssh-config` branch | the branch holds nothing else |
@@ -189,9 +200,29 @@ A list that mixes them is one app with up to four policies, in this order: Bypas
 
 - an app on `host/admin` covers `/admin`, `/admin/` and `/admin/x`, and **not** `/administrator` or `/adminfoo` (whole path segments, as this tool assumes everywhere);
 - it covers `/ADMIN` and `/Admin/x` too: Access compares paths without case. The tool compares them the same way, so `/Admin` and `/admin/` are the same path (an error if both are listed);
-- a percent-encoded slash (`/admin%2Fx`) is **not** covered: it reaches the origin, which may decode it as `/admin/x`. Nothing in Access can match it; an app must not rely on Access alone for such paths.
+- a percent-encoded slash (`/admin%2Fx`, `/admin%2fx`) or backslash (`/admin%5Cx`) is **not** covered: it reaches the origin, which may decode it as `/admin/x`. Nothing in Access can match it, so the tool blocks such requests with a WAF custom rule (decision 21, below).
 
 So the loader rejects what would make a rule mean something else: `*` (a wildcard), `%` (Access doesn't decode), `//`, and two spellings of one path. The tunnel's 404 rule on extra hostnames is a regular expression on the path as written (`^/admin(/.*)?$`), and cloudflared matches it with case, so on an extra hostname `/ADMIN` would reach the origin (inferred from the regex, not observed: the probe could not tell the tunnel's 404 from the origin's). A path open without a login under a path that answers 404 there is 404 there too (a warning).
+
+**Encoded slashes are blocked (decision 21).** Every hostname with a path-level login app (a `web.access` path other than `/` whose list has a person: `staff`, a group or an email) is in its zone's one WAF custom rule `infra-sync: block encoded slashes`, which blocks a request whose path contains `%2F` or `%5C` in any case:
+
+```
+(http.host in {"a.example.com" "b.example.com"}) and (lower(raw.http.request.uri.path) contains "%2f" or lower(raw.http.request.uri.path) contains "%5c")
+```
+
+- **Which hostnames:** the droplet's own name; its extra hostnames only when `/` is not `[everyone]` (on a public site those paths answer 404 in the tunnel there, with no Access app). A frozen droplet's hostnames are left out (frozen means no change). The query string is not part of the path, so `?next=%2Fadmin` is never blocked.
+- **Ownership:** the rule is the tool's by its exact description. Every other custom rule in the zone is left alone. A new rule is added first in the zone's list (no earlier `skip` rule can bypass it); a zone with no custom rules gets its entry point ruleset created with only this rule. A zone with no such hostname has no rule (the tool's is deleted).
+- **Limits:** Free zones have 5 custom rules (Pro 20, Business 100, Enterprise 1,000), counted over every rule of the phase. A zone already at its limit gets a conflict warning and a report op instead, and an expression over 4,096 characters too. The PR comment shows the rule with the hosts as its detail.
+- **Reads:** a zone whose custom rules can't be read (for example a token without Zone WAF: Edit) is an error: the check fails, still posts its comment, and the apply writes nothing.
+
+What Cloudflare documents, and what was inferred (checked 2026-11-19):
+
+- `http.request.uri.path` is just "the URI path of the request" ([field](https://developers.cloudflare.com/ruleset-engine/rules-language/fields/reference/http.request.uri.path/)). With "Normalize incoming URLs" on (the default), WAF custom rules and Access see the normalized URL ([settings](https://developers.cloudflare.com/rules/normalization/settings/)). Normalization decodes only unreserved characters (letters, digits, `-` `.` `_` `~`), uppercases percent-encodings and turns literal backslashes into slashes ([how it works](https://developers.cloudflare.com/rules/normalization/how-it-works/)). Cloudflare "follows RFC 3986, which specifies that `%2F` should not be automatically normalized to `/`" ([encoded slash example](https://developers.cloudflare.com/rules/transform/examples/normalize-encoded-slash/)). That `%5C` stays encoded is an inference from the same rules, not a stated one.
+- `raw.http.request.uri.path` "preserve[s] original request values" (it "may include some basic normalization done by Cloudflare's HTTP server") ([field](https://developers.cloudflare.com/ruleset-engine/rules-language/fields/reference/raw.http.request.uri.path/)). The rule matches it, so a change to the normalization settings can't turn it off. Cloudflare's own `%2F` example matches `lower(raw.http.request.full_uri) wildcard "*%2f*"`.
+- `contains` is case-sensitive and `matches` (regex) needs a Business or Enterprise plan ([operators](https://developers.cloudflare.com/ruleset-engine/rules-language/operators/)); custom rules on Free and Pro have no regex ([custom rules](https://developers.cloudflare.com/waf/custom-rules/)). So the path is lowercased with `lower()` ([functions](https://developers.cloudflare.com/ruleset-engine/rules-language/functions/)) and tested with `contains`. An expression is at most 4,096 characters ([expressions](https://developers.cloudflare.com/ruleset-engine/rules-language/expressions/)).
+- **Not documented:** whether `http.host` is lowercased. Access matched a mixed-case `Host` header in the read-only probe, and the rule compares `http.host` as sent. Check it once the rule is live (a mixed-case `Host` with `%2F` should get the block page); if it doesn't, switch to `lower(http.host)`.
+- **API** ([create custom rules via API](https://developers.cloudflare.com/waf/custom-rules/create-api/)): `GET /zones/{zone}/rulesets/phases/http_request_firewall_custom/entrypoint` ([view](https://developers.cloudflare.com/ruleset-engine/rulesets-api/view/)), 404 when the zone has none, then `POST /zones/{zone}/rulesets` with `kind: zone` and that phase ([create](https://developers.cloudflare.com/ruleset-engine/rulesets-api/create/)). Otherwise one rule at a time, never a `PUT` of the whole ruleset: `POST …/rulesets/{ruleset}/rules` (added at the end unless `position` says otherwise, [add](https://developers.cloudflare.com/ruleset-engine/rulesets-api/add-rule/)), `PATCH …/rules/{rule}` ([update](https://developers.cloudflare.com/ruleset-engine/rulesets-api/update-rule/)) and `DELETE …/rules/{rule}` ([delete](https://developers.cloudflare.com/ruleset-engine/rulesets-api/delete-rule/)).
+- A read-only probe of a live public site (2026-11-19): `/admin/` got the Access login; `/admin%2Fx` and `/admin%2fx` were answered by the origin (a redirect to its own login); `/admin%5Cx` got the origin's 404. A mixed-case `Host` got the Access login on `/admin/` and the origin on `/admin%2Fx`.
 
 **For staff: common changes.**
 
@@ -360,7 +391,7 @@ A plan is a list of ops:
   provider: "cloudflare",            // digitalocean | cloudflare | oneuptime | github
   module: "cloudflare",              // which module produced it
   kind: "dns-record",                // droplet | firewall | firewall-rule | infra-target | infra-app
-                                     // | access-app | tunnel-ingress | dns-record | monitor | ssh-config
+                                     // | access-app | tunnel-ingress | dns-record | waf-rule | monitor | ssh-config
   key: "A vpc-shop.example.com",     // stable per kind (conventions in src/core/plan.ts)
   action: "create",                  // create | update | delete | report (shown, never applied)
   before: null,
@@ -376,7 +407,7 @@ A plan is a list of ops:
 - **`check` and `drift` can't write.** Their API clients refuse every write before it is sent (`ApiClient` with `allowWrites: false`). The only non-GET requests they allow are OneUptime's list endpoints, which are POST reads marked `read: true`.
 - **Apply is all-or-nothing.** `apply` writes nothing if any check fails, any read fails or any plan has an error, and the first module that fails stops the run.
 - **Create-only droplets.** The tool creates droplets but never resizes, rebuilds or deletes one.
-- **Ownership by marker.** The tool changes only objects marked `managed-by:infra-sync`; everything else is left alone. Owned monitors are never deleted.
+- **Ownership by marker.** The tool changes only objects marked `managed-by:infra-sync` (and, in WAF custom rules, only the rule described exactly `infra-sync: block encoded slashes`); everything else is left alone. Owned monitors are never deleted.
 - **Firewalls are report-only.** `firewall` ops are always `report` until migration Phase 5, and `applyFirewall` refuses anything else.
 - **Frozen droplets** (`frozen: true`) are planned but never applied, except their SSH access (the `ssh-access` tag on the existing target and the people on the existing `ssh-` app; see "SSH access").
 - **The loader never follows symlinks.** It reads nothing outside `account.yaml`, `droplets/` and `profiles/`, so a pull request can't make the tool read other files.

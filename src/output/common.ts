@@ -26,6 +26,7 @@ export const KIND_LABEL: Record<ResourceKind, string> = {
   "access-app": "Site Access apps",
   "tunnel-ingress": "Tunnel routes",
   "dns-record": "DNS records",
+  "waf-rule": "WAF custom rules",
   monitor: "Monitors",
   "ssh-config": "ssh config",
   firewall: "Firewalls",

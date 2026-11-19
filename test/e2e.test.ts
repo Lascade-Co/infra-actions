@@ -183,6 +183,35 @@ describe("end to end: the example checkout against fakes of every API", () => {
     // The firewall report: one collapsed block per droplet.
     expect(md).toMatch(/<details><summary>Firewall rules: report only, not enforced until Phase 5 \(\d+ on \d+ droplet\(s\)\)<\/summary>/);
     expect(md).toMatch(/<details><summary>`db\.example\.com`: \d+ to allow<\/summary>/);
+    // Decision 21: the zone's WAF rule, with its hosts as the detail.
+    expect(md).toContain('- **create** Cloudflare waf-rule `example.com`: block percent-encoded');
+    expect(md).toContain('`→ {"hosts":["shop.example.com"]}`');
+    expect(w.writes()).toEqual({ digitalocean: 0, cloudflare: 0, oneuptime: 0, github: 0 });
+  });
+
+  it("a WAF read the token may not make: the check fails but still writes its comment, and apply writes nothing", async () => {
+    const w = await world();
+    w.cf.failWhen((c) =>
+      c.method === "GET" && c.path.endsWith("/rulesets/phases/http_request_firewall_custom/entrypoint")
+        ? { status: 403, body: { success: false, errors: [{ code: 10000, message: "Authentication error" }] } }
+        : undefined,
+    );
+    tmp = await mkdtemp(join(tmpdir(), "infra-e2e-"));
+    const out = join(tmp, "comment.md");
+    const stdout: string[] = [];
+    const io = { stdout: (l: string) => stdout.push(l), stderr: () => {}, env: ENV, fetch: w.fetch, now: () => new Date("2026-11-19T00:00:00Z"), sleep: async () => {} };
+    expect(await main(["check", EXAMPLE_DIR, "--out", out], io)).toBe(1);
+    expect(stdout[0]).toMatch(/^infra check: FAIL/);
+    const md = await readFile(out, "utf8");
+    expect(md).toContain('The WAF custom rules could not be read: the Cloudflare token needs the zone permission "Zone WAF: Edit"');
+    // The rest of the Cloudflare plan is still in the comment.
+    expect(md).toContain("shop.example.com/admin");
+
+    const report = await run(w, "apply");
+    expect(report.stages.find((s) => s.stage === "observe cloudflare")?.status).toBe("ok");
+    expect(report.stages.find((s) => s.stage === "plan cloudflare")?.status).toBe("ok");
+    expect(reportPassed(report)).toBe(false);
+    expect(report.applied).toEqual([]);
     expect(w.writes()).toEqual({ digitalocean: 0, cloudflare: 0, oneuptime: 0, github: 0 });
   });
 });

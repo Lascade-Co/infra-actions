@@ -5,6 +5,23 @@ export interface Zone {
   id: string;
   name: string;
   status?: string;
+  /** The zone's plan, as GET /zones returns it (legacy_id: free | pro | business | enterprise). */
+  plan?: { legacy_id?: string; name?: string };
+}
+
+/** One rule of a zone's http_request_firewall_custom entry point ruleset (WAF custom rules). */
+export interface WafRule {
+  id: string;
+  description?: string;
+  action?: string;
+  expression?: string;
+  enabled?: boolean;
+}
+
+/** A zone's http_request_firewall_custom entry point ruleset. */
+export interface WafRuleset {
+  id: string;
+  rules?: WafRule[];
 }
 
 export interface InfraTarget {
@@ -96,6 +113,11 @@ export interface CloudflareObserved {
   tunnels: Record<string, TunnelConfiguration | ReadError>;
   /** By zone id: every record of the zone (ssh-, vpc-, site hostnames, dependents). */
   dns: Record<string, DnsRecord[] | ReadError>;
+  /**
+   * By zone id: the zone's WAF custom rules entry point ruleset (decision 21); null when the zone
+   * has none yet (404). A failed read is an error in the plan (it blocks the apply).
+   */
+  waf: Record<string, WafRuleset | null | ReadError>;
 }
 
 // ---------- Dependents (names that point at a site; guard rail 1) ----------

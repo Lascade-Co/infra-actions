@@ -4,7 +4,8 @@
 //   creates/updates per hostname: target -> Access app -> tunnel route -> DNS
 //   sites: exception apps, then gating apps -> route (only once every gating app is in place) -> CNAME
 //   deletes per hostname: DNS -> route -> Access app -> target, stopping at the first failure
-//   then vpc- records, healthcheck bypass apps, and last the infrastructure apps no set wants
+//   then vpc- records, healthcheck bypass apps, the infrastructure apps no set wants, and last
+//   the WAF custom rule of each zone (decision 21), one rule at a time
 //
 // An op runs only when every op it depends on (ids.deps) that is in this apply succeeded. Each
 // tunnel configuration is read fresh, changed and written back as one document; a route op whose
@@ -15,6 +16,7 @@ import type { CfClient } from "./client.js";
 import { mergeIngress, rulesFor, sameGroup, type UpsertTarget } from "./ingress.js";
 import { PHASE } from "./ops.js";
 import type { IngressRule } from "./types.js";
+import { wafRuleBody } from "./waf.js";
 
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 const ref = (op: PlanOp) => `${op.kind} ${op.key}`;
@@ -80,6 +82,19 @@ export async function applyOps(cf: CfClient, input: PlanOp[]): Promise<ApplyResu
         else if (op.action === "update") await cf.patchDns(zone, id, op.after);
         else await cf.deleteDns(zone, id);
         return;
+      case "waf-rule": {
+        // The body is rebuilt from the hosts the plan showed. A zone with no entry point ruleset
+        // gets one holding only this rule; otherwise only this rule is added (first, so no other
+        // rule's skip can bypass it), patched or deleted.
+        const rs = op.ids?.ruleset ?? "";
+        const hosts = ((op.after as { hosts?: string[] } | null)?.hosts ?? []).map(String);
+        if (op.action === "create") {
+          if (rs) await cf.addWafRule(zone, rs, { ...wafRuleBody(hosts), position: { before: "" } });
+          else await cf.createWafEntrypoint(zone, wafRuleBody(hosts));
+        } else if (op.action === "update") await cf.updateWafRule(zone, rs, id, wafRuleBody(hosts));
+        else await cf.deleteWafRule(zone, rs, id);
+        return;
+      }
       default:
         throw new Error(`cloudflare apply does not handle ${op.kind}`);
     }

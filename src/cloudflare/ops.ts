@@ -2,7 +2,8 @@
 //
 // Each op carries everything apply needs, because apply gets only the ops the engine lets through
 // (no report ops, nothing for a frozen droplet, nothing pending) plus the observed state:
-//   after       the request body (or, for a tunnel route, the rule group to write)
+//   after       the request body (or, for a tunnel route, the rule group to write; for a WAF
+//               rule, { hosts }, from which apply rebuilds the body: waf.ts)
 //   before      what is there now (for a tunnel route, the rule group apply expects to find)
 //   ids.id      the object's id (update, delete); ids.zone; ids.tunnel
 //   ids.phase   the step in the Worker's order (sync.ts there), see PHASE
@@ -43,6 +44,8 @@ export const PHASE = {
   healthDelete: 18,
   /** Unwanted infrastructure apps (the Worker's single app, unused sets): last, after every app and target op. */
   infraAppDelete: 19,
+  /** WAF custom rules (decision 21, waf.ts): one per zone, independent of every other op. */
+  waf: 20,
 } as const;
 
 /** Role of an op in its hostname's chain (see deps below). */

@@ -6,7 +6,9 @@ import type { ApplyResult, ModulePlan, PlanOp, Provider, RunContext } from "../c
 import { applyOps } from "./apply.js";
 import { CfClient } from "./client.js";
 import { toOps } from "./ops.js";
+import { PHASE } from "./ops.js";
 import { adaptDroplets, buildPlan, cfgFrom, snapshotFrom } from "./plan.js";
+import { planWaf } from "./waf.js";
 import type { CloudflareObserved } from "./types.js";
 
 export type * from "./types.js";
@@ -24,9 +26,11 @@ export function cloudflareClient(ctx: RunContext): CfClient {
 
 /**
  * Read-only: zones (account), infrastructure targets, Access apps, the configuration of every
- * tunnel in account.cloudflare.tunnels, and every DNS record of every zone. A failed tunnel or
- * zone read is kept as { error } so the plan can fail closed (no deletes), as in the Worker; a
- * failed zone, target or app listing (or no zones at all) throws: nothing is planned.
+ * tunnel in account.cloudflare.tunnels, every DNS record of every zone, and each zone's WAF custom
+ * rules (decision 21). A failed tunnel or zone read is kept as { error } so the plan can fail
+ * closed (no deletes), as in the Worker; a failed WAF read is kept the same way and becomes an
+ * error in the plan (the rest of the plan is still shown). A failed zone, target or app listing
+ * (or no zones at all) throws: nothing is planned.
  */
 export async function observeCloudflare(ctx: RunContext): Promise<CloudflareObserved> {
   const cf = cloudflareClient(ctx);
@@ -50,7 +54,15 @@ export async function observeCloudflare(ctx: RunContext): Promise<CloudflareObse
       dns[z.id] = { error: errText(e) };
     }
   }
-  return { zones, targets, apps, tunnels, dns };
+  const waf: CloudflareObserved["waf"] = {};
+  for (const z of zones) {
+    try {
+      waf[z.id] = await cf.getWafEntrypoint(z.id);
+    } catch (e) {
+      waf[z.id] = { error: errText(e) };
+    }
+  }
+  return { zones, targets, apps, tunnels, dns, waf };
 }
 
 /**
@@ -82,7 +94,16 @@ export function planCloudflare(desired: DesiredState, observed: CloudflareObserv
   }
   const snap = snapshotFrom(observed);
   const plan = buildPlan(snap, cfgFrom(desired.account), adaptDroplets(desired));
-  const { ops, unchanged } = toOps(plan, snap, desired);
+  const built = toOps(plan, snap, desired);
+  // Decision 21: one WAF custom rule per zone, after every other step. A failed WAF read is its own
+  // error; it does not count as a read failure of the rest (which would hold every delete back).
+  const waf = planWaf(desired, observed, plan.web, {
+    phase: PHASE.waf,
+    deletionsAllowed: plan.deletionsAllowed,
+    ...(plan.deletionBlockReason ? { deletionBlockReason: plan.deletionBlockReason } : {}),
+  });
+  const ops = [...built.ops, ...waf.ops];
+  const unchanged = built.unchanged + waf.unchanged;
   const sourceOf = new Map(desired.droplets.map((d) => [d.name, d.source]));
   const diagnostics: Diagnostic[] = plan.diagnostics.map((d) => ({
     level: d.level,
@@ -91,10 +112,11 @@ export function planCloudflare(desired: DesiredState, observed: CloudflareObserv
     ...(d.droplet ? { droplet: d.droplet } : {}),
     ...(d.droplet && sourceOf.has(d.droplet) ? { file: sourceOf.get(d.droplet)! } : {}),
   }));
+  diagnostics.push(...waf.diagnostics);
   return { module: "cloudflare", ops, unchanged, diagnostics };
 }
 
-/** Performs the ops in the Worker's fail-closed order (create: target -> app -> ingress -> DNS; delete: DNS -> ingress -> app -> target). */
+/** Performs the ops in the Worker's fail-closed order (create: target -> app -> ingress -> DNS; delete: DNS -> ingress -> app -> target), then the WAF rules. */
 export async function applyCloudflare(ctx: RunContext, ops: PlanOp[], _observed: CloudflareObserved): Promise<ApplyResult> {
   return applyOps(cloudflareClient(ctx), ops);
 }

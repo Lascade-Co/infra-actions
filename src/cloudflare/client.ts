@@ -1,10 +1,12 @@
 // Cloudflare API v4, the endpoints the Worker used (src/clients/cloudflare.ts there), over the
 // shared ApiClient: a client built for a read-only run refuses every write before any request.
 
-import { ApiClient, type FetchFn } from "../core/http.js";
-import type { AccessApp, DnsRecord, InfraTarget, TunnelConfigDoc, TunnelConfiguration, Zone } from "./types.js";
+import { ApiClient, ApiError, type FetchFn } from "../core/http.js";
+import type { AccessApp, DnsRecord, InfraTarget, TunnelConfigDoc, TunnelConfiguration, WafRule, WafRuleset, Zone } from "./types.js";
 
 export const CF_API_BASE = "https://api.cloudflare.com/client/v4";
+/** The phase of a zone's WAF custom rules (decision 21). */
+export const WAF_PHASE = "http_request_firewall_custom";
 const MAX_PAGES = 100;
 
 interface Envelope<T> {
@@ -76,6 +78,19 @@ export class CfClient {
     return this.listAll<DnsRecord>(`/zones/${zoneId}/dns_records`, {}, 5000);
   }
 
+  /**
+   * The zone's WAF custom rules entry point ruleset, or null when the zone has none (404).
+   * Token permission: Zone WAF Read or Zone WAF Write ("Zone WAF: Edit" in the dashboard).
+   */
+  async getWafEntrypoint(zoneId: string): Promise<WafRuleset | null> {
+    try {
+      return await this.result<WafRuleset>("GET", `/zones/${zoneId}/rulesets/phases/${WAF_PHASE}/entrypoint`);
+    } catch (e) {
+      if (e instanceof ApiError && e.status === 404) return null;
+      throw e;
+    }
+  }
+
   // ---------- writes ----------
 
   createTarget(b: unknown): Promise<InfraTarget> {
@@ -108,5 +123,22 @@ export class CfClient {
   }
   async deleteDns(zoneId: string, id: string): Promise<void> {
     await this.api.request("DELETE", `/zones/${zoneId}/dns_records/${id}`);
+  }
+  /**
+   * WAF custom rules (decision 21), one rule at a time so the zone's other rules are never sent:
+   * the entry point ruleset is created (POST /rulesets, kind zone) only when the zone has none;
+   * otherwise a rule is added, updated or deleted through the per-rule endpoints. Never PUT.
+   */
+  createWafEntrypoint(zoneId: string, rule: Omit<WafRule, "id">): Promise<WafRuleset> {
+    return this.result("POST", `/zones/${zoneId}/rulesets`, { name: "default", kind: "zone", phase: WAF_PHASE, rules: [rule] });
+  }
+  addWafRule(zoneId: string, rulesetId: string, rule: Omit<WafRule, "id"> & { position?: { before: string } | { after: string } | { index: number } }): Promise<WafRuleset> {
+    return this.result("POST", `/zones/${zoneId}/rulesets/${rulesetId}/rules`, rule);
+  }
+  updateWafRule(zoneId: string, rulesetId: string, ruleId: string, rule: Omit<WafRule, "id">): Promise<WafRuleset> {
+    return this.result("PATCH", `/zones/${zoneId}/rulesets/${rulesetId}/rules/${ruleId}`, rule);
+  }
+  async deleteWafRule(zoneId: string, rulesetId: string, ruleId: string): Promise<void> {
+    await this.api.request("DELETE", `/zones/${zoneId}/rulesets/${rulesetId}/rules/${ruleId}`);
   }
 }

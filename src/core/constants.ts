@@ -39,6 +39,12 @@ export const HEALTH_BYPASS_PATH = "healthcheck";
 export const WEB_APP_PREFIX = "infra-sync: web ";
 export const WEB_ADMIN_APP_PREFIX = "infra-sync: web-admin ";
 export const WEB_EXCEPTION_APP_PREFIX = "infra-sync: web-exception ";
+/**
+ * Decision 21: the description of the one WAF custom rule per zone the tool owns (it blocks
+ * percent-encoded slashes on hostnames with a path-level login app). Rules with any other
+ * description are never touched.
+ */
+export const WAF_RULE_DESCRIPTION = "infra-sync: block encoded slashes";
 /** TTL of the vpc- A records. */
 export const VPC_TTL = 60;
 /** CNAME chains to a site hostname are followed this many hops (dependents, guard rail 1). */

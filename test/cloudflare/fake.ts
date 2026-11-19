@@ -14,7 +14,7 @@ import { isChange, type ApplyResult, type ModulePlan, type PlanOp, type RunConte
 import { Secrets } from "../../src/core/secrets.js";
 import { freezeOps } from "../../src/engine.js";
 import { applyCloudflare, observeCloudflare, planCloudflare } from "../../src/cloudflare/index.js";
-import type { AccessApp, CloudflareObserved, DnsRecord, InfraTarget, TunnelConfiguration, Zone } from "../../src/cloudflare/types.js";
+import type { AccessApp, CloudflareObserved, DnsRecord, InfraTarget, TunnelConfiguration, WafRuleset, Zone } from "../../src/cloudflare/types.js";
 
 export const ACCOUNT = "0123456789abcdef0123456789abcdef";
 export const T_NYC1 = "00000000-0000-4000-8000-0000000000a1";
@@ -103,6 +103,8 @@ export class FakeCloudflare {
   apps: AccessApp[] = [];
   tunnels: Record<string, TunnelConfiguration> = {};
   dns: Record<string, DnsRecord[]> = {};
+  /** By zone id: the http_request_firewall_custom entry point ruleset; absent = none yet (GET 404). */
+  waf: Record<string, WafRuleset> = {};
   calls: Call[] = [];
   failers: Failer[] = [];
 
@@ -258,6 +260,42 @@ export class FakeCloudflare {
       if (method === "DELETE") {
         recs.splice(i, 1);
         return ok({ id: m[2] });
+      }
+    }
+    // WAF custom rules: the entry point ruleset of http_request_firewall_custom, and its rules one by one.
+    if ((m = p.match(/^\/zones\/([^/]+)\/rulesets\/phases\/http_request_firewall_custom\/entrypoint$/)) && method === "GET") {
+      const rs = this.waf[m[1]!];
+      return rs ? ok(structuredClone(rs)) : json({ success: false, errors: [{ code: 10003, message: "could not find entrypoint ruleset in the http_request_firewall_custom phase" }] }, 404);
+    }
+    if ((m = p.match(/^\/zones\/([^/]+)\/rulesets$/)) && method === "POST") {
+      const zid = m[1]!;
+      if (this.waf[zid] || body?.kind !== "zone" || body?.phase !== "http_request_firewall_custom") return json({ success: false, errors: [{ code: 20217, message: "a ruleset already exists for this phase" }] }, 400);
+      this.waf[zid] = { id: newId("ruleset"), rules: (body.rules ?? []).map((r: any) => ({ id: newId("rule"), ...r })) };
+      return ok(structuredClone(this.waf[zid]));
+    }
+    if ((m = p.match(/^\/zones\/([^/]+)\/rulesets\/([^/]+)\/rules$/)) && method === "POST") {
+      const rs = this.waf[m[1]!];
+      if (!rs || rs.id !== m[2]) return json({ success: false, errors: [{ code: 404, message: "ruleset not found" }] }, 404);
+      const { position, ...rule } = body;
+      const rules = rs.rules ?? (rs.rules = []);
+      // As documented: the end by default; before "" = first, after "" = last, or a 1-based index.
+      const near = (id: string, after: boolean) => (id === "" ? (after ? rules.length : 0) : rules.findIndex((r) => r.id === id) + (after ? 1 : 0));
+      const at = position?.index ? position.index - 1 : position && "before" in position ? near(position.before, false) : position && "after" in position ? near(position.after, true) : rules.length;
+      if (at < 0 || at > rules.length) return json({ success: false, errors: [{ code: 400, message: "index out of range" }] }, 400);
+      rules.splice(at, 0, { id: newId("rule"), ...rule });
+      return ok(structuredClone(rs));
+    }
+    if ((m = p.match(/^\/zones\/([^/]+)\/rulesets\/([^/]+)\/rules\/([^/]+)$/))) {
+      const rs = this.waf[m[1]!];
+      const i = rs && rs.id === m[2] ? (rs.rules ?? []).findIndex((r) => r.id === m![3]) : -1;
+      if (!rs || i < 0) return json({ success: false, errors: [{ code: 404, message: "rule not found" }] }, 404);
+      if (method === "PATCH") {
+        rs.rules![i] = { ...rs.rules![i]!, ...body, id: m[3]! };
+        return ok(structuredClone(rs));
+      }
+      if (method === "DELETE") {
+        rs.rules!.splice(i, 1);
+        return ok(structuredClone(rs));
       }
     }
     return json({ success: false, errors: [{ code: 7000, message: `no route ${method} ${p}` }] }, 400);

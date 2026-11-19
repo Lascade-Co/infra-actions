@@ -27,6 +27,7 @@ export type ModuleName = "droplets" | "cloudflare" | "firewall" | "oneuptime" | 
  *  cloudflare   access-app        Access app destination (host or host/path, lowercase)
  *  cloudflare   tunnel-ingress    "<tunnel id> <hostname>[ <path>]"
  *  cloudflare   dns-record        "<type> <name>"
+ *  cloudflare   waf-rule          zone name (the zone's one "infra-sync: block encoded slashes" custom rule, decision 21)
  *  oneuptime    monitor           "<hostname><path>"
  *  github       ssh-config        "<repo>@<branch>:<file>"
  */
@@ -40,6 +41,7 @@ export type ResourceKind =
   | "access-app"
   | "tunnel-ingress"
   | "dns-record"
+  | "waf-rule"
   | "monitor"
   | "ssh-config";
 

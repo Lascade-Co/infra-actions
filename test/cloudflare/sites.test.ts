@@ -351,11 +351,12 @@ describe("sites: exposure changes and removal", () => {
     expect(appDeletes.length).toBe(4); // ssh app, /admin, /a, /b
     expect(Math.min(...appDeletes)).toBeGreaterThan(iTun);
     // 5 SSH-side objects + CNAME + route + 3 site apps: more than 6 and > 30% of this small fleet,
-    // but all one droplet.
-    expect(r.result.applied.filter((o) => o.action === "delete")).toHaveLength(10);
+    // but all one droplet. Plus the zone's WAF rule (decision 21): no login path is left in it.
+    expect(r.result.applied.filter((o) => o.action === "delete")).toHaveLength(11);
     expect(applied(r)).toEqual(
-      expect.arrayContaining([`delete dns-record CNAME ${PILOT}`, `delete tunnel-ingress ${T_BLR1} ${PILOT}`, `delete access-app ${PILOT}/admin`]),
+      expect.arrayContaining([`delete dns-record CNAME ${PILOT}`, `delete tunnel-ingress ${T_BLR1} ${PILOT}`, `delete access-app ${PILOT}/admin`, "delete waf-rule example.com"]),
     );
+    expect(f.waf[Z_COM]!.rules).toEqual([]);
     expect(route(f, PILOT)).toBeUndefined();
     expect(f.apps.some((a) => (a.name ?? "").includes(PILOT))).toBe(false);
     expect(f.tunnels[T_BLR1]!.config?.ingress?.[0]).toEqual(MANUAL_DASHBOARD);
