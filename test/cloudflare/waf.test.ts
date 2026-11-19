@@ -30,17 +30,19 @@ const wafWrites = (f: FakeCloudflare) => f.writes().filter((c) => c.path.include
 const mineIn = (f: FakeCloudflare, zone: string) => (f.waf[zone]?.rules ?? []).filter((r) => r.description === WAF_RULE_DESCRIPTION);
 
 describe("the expression", () => {
-  it("lists the hosts lowercased, deduplicated and sorted, and tests the raw path for %2f or %5c in any case", () => {
+  it("compares the lowercased Host with the hosts lowercased, deduplicated and sorted, and tests the raw path for %2f or %5c in any case", () => {
     expect(wafExpression(["b.example.com", "A.example.com", "b.example.com"])).toBe(
-      '(http.host in {"a.example.com" "b.example.com"}) and (lower(raw.http.request.uri.path) contains "%2f" or lower(raw.http.request.uri.path) contains "%5c")',
+      '(lower(http.host) in {"a.example.com" "b.example.com"}) and (lower(raw.http.request.uri.path) contains "%2f" or lower(raw.http.request.uri.path) contains "%5c")',
     );
     expect(WAF_PATH_TEST).not.toMatch(/matches|~/); // no regex: not on the Free plan
   });
 
   it("reads back only its own form", () => {
     expect(hostsOfExpression(wafExpression(["b.example.com", "a.example.com"]))).toEqual(["a.example.com", "b.example.com"]);
-    expect(hostsOfExpression('(http.host in {"b.example.com" "a.example.com"}) and (' + WAF_PATH_TEST + ")")).toBeUndefined(); // not sorted
-    expect(hostsOfExpression('(http.host in {"a.example.com"}) and (raw.http.request.uri.path contains "%2F")')).toBeUndefined();
+    expect(hostsOfExpression('(lower(http.host) in {"b.example.com" "a.example.com"}) and (' + WAF_PATH_TEST + ")")).toBeUndefined(); // not sorted
+    expect(hostsOfExpression('(lower(http.host) in {"a.example.com"}) and (raw.http.request.uri.path contains "%2F")')).toBeUndefined();
+    // The earlier form, without lower(): not the tool's, so it is put back.
+    expect(hostsOfExpression('(http.host in {"a.example.com"}) and (' + WAF_PATH_TEST + ")")).toBeUndefined();
     expect(hostsOfExpression(undefined)).toBeUndefined();
   });
 });

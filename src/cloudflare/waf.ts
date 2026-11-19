@@ -35,10 +35,18 @@ export const WAF_EXPRESSION_MAX = 4096;
 
 const HOST_RE = /^[a-z0-9.-]+$/;
 
+/**
+ * The host test: the Host header lowercased, since Cloudflare's docs don't say whether http.host
+ * is, and Access matches a mixed-case Host. `lower()` is documented on http.host
+ * (`lower(http.host) == ...`), and a function result on the left of `in {...}` too
+ * (`len(...)[*] in {3 4}`, Rules language "Values").
+ */
+export const WAF_HOST_FIELD = "lower(http.host)";
+
 /** The rule's expression for these hostnames (lowercased, deduplicated, sorted). */
 export function wafExpression(hosts: readonly string[]): string {
   const list = [...new Set(hosts.map(lc))].sort();
-  return `(http.host in {${list.map((h) => `"${h}"`).join(" ")}}) and (${WAF_PATH_TEST})`;
+  return `(${WAF_HOST_FIELD} in {${list.map((h) => `"${h}"`).join(" ")}}) and (${WAF_PATH_TEST})`;
 }
 
 /** The request body of the tool's rule for these hostnames. */
@@ -48,7 +56,7 @@ export function wafRuleBody(hosts: readonly string[]): Omit<WafRule, "id"> {
 
 /** The hostnames of an expression in exactly the tool's form, else undefined. */
 export function hostsOfExpression(expression: string | undefined): string[] | undefined {
-  const m = /^\(http\.host in \{([^}]*)\}\) and \((.*)\)$/.exec(expression ?? "");
+  const m = /^\(lower\(http\.host\) in \{([^}]*)\}\) and \((.*)\)$/.exec(expression ?? "");
   if (!m || m[2] !== WAF_PATH_TEST) return undefined;
   const hosts = m[1]!.trim() ? m[1]!.trim().split(/\s+/).map((h) => h.replace(/^"(.*)"$/, "$1")) : [];
   return wafExpression(hosts) === expression ? hosts : undefined;
