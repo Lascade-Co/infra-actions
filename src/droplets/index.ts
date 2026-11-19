@@ -1,21 +1,21 @@
-// B4: droplet creation (create-only) and the DigitalOcean tags written from droplet files.
-// See README.md in this folder.
+// B4: droplet creation (create-only). See README.md in this folder.
 //
 // Safety:
-//  - create-only: the only writes are POST /v2/droplets for a name that does not exist yet and
-//    tag/untag of the managed tags. Nothing is resized, rebuilt, renamed or deleted, and tags
-//    outside MANAGED_TAGS are never added or removed;
+//  - create-only: the only write is POST /v2/droplets for a name that does not exist yet. Nothing
+//    is resized, rebuilt, renamed or deleted, and no tag is ever added to or removed from an
+//    existing droplet (decision 20: the droplet file is the only source of truth). A droplet the
+//    tool creates is created with the old firewall tag of its env (FIREWALL_TAGS), so today's
+//    tag-attached firewalls cover it from birth;
 //  - a create is never retried: the name is checked against a fresh list first, and any error
 //    stops the apply (a later apply sees the droplet if the failed request did create it);
 //  - user_data never appears in a plan op or a message, only in the POST body.
 
-import { MANAGED_TAGS } from "../core/constants.js";
 import type { DesiredDroplet, DesiredState } from "../core/desired.js";
 import type { Diagnostic } from "../core/diagnostics.js";
 import type { ApiClient } from "../core/http.js";
 import type { DropletsObserved, ObservedDroplet } from "../core/observed.js";
 import type { ApplyResult, ModulePlan, OpFailure, PlanOp, Provider, RunContext } from "../core/plan.js";
-import { checkDroplet, doClient, getDroplet, listAllDroplets, tagDroplet, untagDroplet, type DoDroplet } from "./api.js";
+import { checkDroplet, doClient, getDroplet, listAllDroplets, type DoDroplet } from "./api.js";
 
 export type { DropletsObserved } from "../core/observed.js";
 
@@ -43,8 +43,6 @@ export interface DoCreateDropletBody {
 export const POLL_INTERVAL_MS = 5_000;
 export const MAX_POLLS = 60;
 
-const MANAGED = new Set(MANAGED_TAGS);
-const managedOnly = (tags: readonly string[]): string[] => [...new Set(tags.filter((t) => MANAGED.has(t)))].sort();
 const errText = (e: unknown): string => (e instanceof Error ? e.message : String(e));
 
 /** Maps one DigitalOcean API droplet object to the shared observed shape. Throws on a malformed one. */
@@ -70,7 +68,7 @@ export function toObservedDroplet(apiDroplet: unknown): ObservedDroplet {
   };
 }
 
-/** The create request for a droplet with status "create" (profile + env region + managed tags). */
+/** The create request for a droplet with status "create" (profile + env region + the env's firewall tag). */
 export function createRequest(d: DesiredDroplet): DoCreateDropletBody {
   if (d.status !== "create") throw new Error(`${d.name}: only a droplet with status "create" has a create request (status ${d.status})`);
   if (!d.profile) throw new Error(`${d.name}: profile ${d.spec.profile ?? "(none)"} is not loaded`);
@@ -95,10 +93,8 @@ function createAfter(body: DoCreateDropletBody, profile: string): PlanOp["after"
 }
 
 /**
- * Pure. Ops:
- *  - kind "droplet", action "create", for each status "create" droplet (after: the create request, user_data elided);
- *  - kind "droplet-tags", action "update", when the managed tags (MANAGED_TAGS) on an existing droplet differ
- *    from desired.tags; before/after list managed tags only; other tags are never touched.
+ * Pure. Ops: kind "droplet", action "create", for each status "create" droplet (after: the create
+ * request, user_data elided). Existing droplets get no op: their tags are never written (decision 20).
  * Never resize, rebuild or delete: differences in size/image/region are at most info diagnostics.
  */
 export function planDroplets(desired: DesiredState, _observed: DropletsObserved): ModulePlan {
@@ -123,35 +119,15 @@ export function planDroplets(desired: DesiredState, _observed: DropletsObserved)
         action: "create",
         before: null,
         after: createAfter(body, d.profile!.name),
-        reason: `new droplet from profile ${d.profile!.name} (${body.size}, ${body.image}) in ${body.region}, the region of env ${d.env}`,
+        reason: `new droplet from profile ${d.profile!.name} (${body.size}, ${body.image}) in ${body.region}, the region of env ${d.env}${body.tags.length ? `, tagged ${body.tags.join(", ")} for today's firewalls` : ""}`,
         droplet: d.name,
       });
       continue;
     }
     if (d.status !== "exists" || !d.observed) continue; // missing / conflict: buildDesired already reported them
 
-    const obs = d.observed;
-    diagnostics.push(...profileDrift(desired, d, obs));
-    const before = managedOnly(obs.tags);
-    const after = managedOnly(d.tags);
-    if (before.join(",") === after.join(",")) {
-      unchanged++;
-      continue;
-    }
-    const add = after.filter((t) => !before.includes(t));
-    const remove = before.filter((t) => !after.includes(t));
-    ops.push({
-      provider: "digitalocean",
-      module: "droplets",
-      kind: "droplet-tags",
-      key: d.name,
-      action: "update",
-      before: { tags: before },
-      after: { tags: after },
-      reason: `managed tags written from the droplet file: ${[...add.map((t) => `add ${t}`), ...remove.map((t) => `remove ${t}`)].join(", ")}`,
-      droplet: d.name,
-      ids: { droplet_id: String(obs.id) },
-    });
+    diagnostics.push(...profileDrift(desired, d, d.observed));
+    unchanged++;
   }
   return { module: "droplets", ops, unchanged, diagnostics };
 }
@@ -186,17 +162,10 @@ export interface ApplyDropletsOptions {
 }
 
 const isCreate = (op: PlanOp) => op.kind === "droplet" && op.action === "create";
-const isTagUpdate = (op: PlanOp) => op.kind === "droplet-tags" && op.action === "update";
-
-/** The managed tags an op's before/after lists (anything else is dropped). */
-function opTags(v: PlanOp["before"]): string[] {
-  const tags = v && typeof v === "object" && !Array.isArray(v) ? v.tags : undefined;
-  return Array.isArray(tags) ? managedOnly(tags.filter((t): t is string => typeof t === "string")) : [];
-}
 
 /**
  * Performs the ops in order: creates, then waits (ctx.sleep, bounded) until every new droplet is
- * active with a public and a private IPv4, then tag changes. Stops at the first error: the failed
+ * active with a public and a private IPv4. Anything else (a tag change included) is refused. Stops at the first error: the failed
  * op is reported and every op after it is skipped. Returns ApplyResult; the engine re-observes after.
  */
 export async function applyDroplets(ctx: RunContext, ops: PlanOp[], opts: ApplyDropletsOptions = {}): Promise<ApplyResult> {
@@ -210,16 +179,13 @@ export async function applyDroplets(ctx: RunContext, ops: PlanOp[], opts: ApplyD
   for (const op of ops) {
     if (op.action === "report") result.skipped.push({ op, reason: "report only" });
     else if (op.module !== "droplets" || op.provider !== "digitalocean") refused.push({ op, error: `refused: not a droplets op (${op.module})` });
-    else if (isCreate(op) || isTagUpdate(op)) todo.push(op);
+    else if (isCreate(op)) todo.push(op);
+    else if (op.kind === "droplet-tags") refused.push({ op, error: "refused: the tool never writes DigitalOcean tags (decision 20)" });
     else refused.push({ op, error: `refused: create-only, the tool never does ${op.action} on ${op.kind}` });
   }
-  const creates = todo.filter(isCreate);
-  const tagOps = todo.filter(isTagUpdate);
+  const creates = todo;
   for (const op of creates) {
     if (!opts.requests?.get(op.key)) refused.push({ op, error: "refused: no create request for this droplet in the current plan" });
-  }
-  for (const op of tagOps) {
-    if (!/^\d+$/.test(op.ids?.droplet_id ?? "")) refused.push({ op, error: "refused: the op has no droplet id" });
   }
   if (refused.length) {
     result.failed.push(...refused);
@@ -240,7 +206,7 @@ export async function applyDroplets(ctx: RunContext, ops: PlanOp[], opts: ApplyD
 
   // Stops the run at `op`: droplets created so far stay applied (they exist), `op` failed,
   // every later op skipped.
-  const queue = [...creates, ...tagOps];
+  const queue = [...creates];
   const created: Array<{ op: PlanOp; id: number }> = [];
   const settled = new Set<PlanOp>();
   const markApplied = (op: PlanOp, applied: PlanOp = op) => {
@@ -315,28 +281,6 @@ export async function applyDroplets(ctx: RunContext, ops: PlanOp[], opts: ApplyD
     }
   }
 
-  // 4. Managed tags on existing droplets: add first (never leaves a droplet without its env tag), then remove.
-  for (const op of tagOps) {
-    const id = Number(op.ids!.droplet_id);
-    const before = opTags(op.before);
-    const after = opTags(op.after);
-    const add = after.filter((t) => !before.includes(t));
-    const remove = before.filter((t) => !after.includes(t));
-    const done: string[] = [];
-    try {
-      for (const t of add) {
-        await tagDroplet(api, t, id);
-        done.push(`added ${t}`);
-      }
-      for (const t of remove) {
-        await untagDroplet(api, t, id);
-        done.push(`removed ${t}`);
-      }
-    } catch (e) {
-      return stop(op, `${errText(e)}${done.length ? ` (already done: ${done.join(", ")})` : ""}`);
-    }
-    markApplied(op);
-  }
   return result;
 }
 

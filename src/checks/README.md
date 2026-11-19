@@ -10,10 +10,11 @@ These checks are pure functions that return `Diagnostic[]`. They never throw for
 - YAML (one document per file, no duplicate keys);
 - the JSON Schema;
 - name = file name;
-- ports, CIDRs and `who` syntax;
-- duplicate or clashing paths and reserved `ssh-`/`vpc-` prefixes;
-- monitor hostnames, a profile's `user_data` file, and account-internal references (CI token names, a tunnel for every env region);
-- through the schema: a missing or empty `ssh` list, an `ssh` entry that is neither a group name nor an email, and an empty or badly named group in `ssh_groups`.
+- ports, CIDRs, `who` syntax (allow.tunnel) and who-list entries (`ssh`, `web.access`);
+- `web.access` paths: `"/"` is required (`web-access-root`); no two spellings of one path once lowercased and stripped of a trailing slash, as Access compares them (`web-access-duplicate`); no `*`, `%` or `//` (`web-access-path`: a wildcard changes what an Access path covers, and Access doesn't decode `%`);
+- reserved `ssh-`/`vpc-` prefixes;
+- monitor hostnames, a profile's `user_data` file, and account-internal references (a tunnel for every env region);
+- through the schema: a missing or empty `ssh` list or who-list, an entry that is none of the who-list forms, and an empty or badly named group in `groups` (`staff` and `everyone` are not group names).
 
 ## What B2 must do
 
@@ -26,11 +27,12 @@ These checks are pure functions that return `Diagnostic[]`. They never throw for
 - **References.**
   - `profile` exists in `profiles/`.
   - `allow.droplet[].from` names a droplet file. Code `unknown-droplet`: this also covers removing a droplet that others still list.
-  - Every `service-token:<name>` and exception `service_tokens` entry is a key of `account.cloudflare.service_tokens`.
-- **Deploy.** `deploy: true` with an empty `ci_deploy_tokens[env]` is a warning (the Worker warns too).
+  - Every `service-token:<name>` (allow.tunnel) and `token:<name>` (who-lists) is a key of `account.cloudflare.service_tokens`.
 - **Tunnel UDP.** `allow.tunnel` with `/udp` is only valid with `who: [staff]`. The message gives the reason: service tokens are TCP only, and UDP goes through the client's private-network route.
 - **Swarm.** At least one `role: manager` per cluster. All members agree on `encrypted_overlay`.
-- **SSH access** (decision 18). Each `ssh[i]` that is a group name must be a key of `account.yaml` `ssh_groups`. Each email, in a droplet's `ssh` or in an `ssh_groups` list, must be in `account.yaml` `ssh_email_domain`: the part after `@` must equal it exactly (case-insensitive), so a subdomain or a look-alike suffix fails. Group emails are reported at their place in `account.yaml` (`ssh_groups.<name>[i]`). An empty list or group is rejected again here, for configs built in code.
+- **Who-lists** (`ssh`, decision 18, and `web.access`, decision 19). Each group must be a key of `account.yaml` `groups`. Each email, in a list or in a group, must be in `account.yaml` `email_domain`: the part after `@` must equal it exactly (case-insensitive), so a subdomain or a look-alike suffix fails. Group emails are reported at their place in `account.yaml` (`groups.<name>[i]`). `everyone` stands alone in a list. `everyone` and `ip:` are web only: an error in `ssh`. No group is named `staff` or `everyone`. An empty list or group is rejected again here, for configs built in code.
+- **CI and `/healthcheck/`.** A droplet with `web:` whose `ssh` has a `token:ci-*` entry and whose `web.access` has no `/healthcheck/` gets a warning: CI's post-deploy check would get the login.
+- **404 on extra hostnames.** On a site whose `"/"` is `[everyone]` and that has extra hostnames, a path open without a login under a path that needs one gets a warning: the tunnel's 404 rule covers it too there.
 
 **`checkDesired(desired)`** runs after the droplets are observed:
 
@@ -58,13 +60,17 @@ Swarm peers need no reference check. Membership is by cluster name, so every pee
 | `hostname-claimed` | error | each claimer except a droplet's own name |
 | `unknown-profile` | error | `profile` |
 | `unknown-droplet` | error | `allow.droplet[i].from` |
-| `unknown-service-token` | error | `allow.tunnel[i].who[j]`, `web.exceptions[i].allow.service_tokens` |
-| `no-deploy-token` | warning | `deploy` |
+| `unknown-service-token` | error | `allow.tunnel[i].who[j]`, `ssh[i]`, `web.access["<path>"][i]` |
 | `udp-needs-staff` | error | `allow.tunnel[i].port` |
-| `unknown-ssh-group` | error | `ssh[i]` |
-| `ssh-email-domain` | error | `ssh[i]`, or `ssh_groups.<name>[i]` in `account.yaml` |
+| `unknown-group` | error | `ssh[i]`, `web.access["<path>"][i]` |
+| `email-domain` | error | `ssh[i]`, `web.access["<path>"][i]`, or `groups.<name>[i]` in `account.yaml` |
 | `ssh-missing` | error | `ssh` (empty list; the schema catches it first in a file) |
-| `ssh-group-empty` | error | `ssh_groups.<name>` in `account.yaml` (the schema catches it first in a file) |
+| `who-list-empty` | error | `web.access["<path>"]` (the schema catches it first in a file) |
+| `everyone-mixed` | error | the list |
+| `ssh-web-only` | error | `ssh[i]` (`everyone`, `ip:`) |
+| `group-empty`, `group-reserved-name` | error | `groups.<name>` in `account.yaml` (the schema catches both first in a file) |
+| `ci-token-no-healthcheck` | warning | `web.access` |
+| `web-access-under-404` | warning | `web.access["<path>"]` |
 | `swarm-no-manager` | error | `swarm.role` of every member |
 | `swarm-overlay-mismatch` | error | `swarm.encrypted_overlay` of the minority |
 | `swarm-region` | error | `swarm.cluster` of members outside the main region |

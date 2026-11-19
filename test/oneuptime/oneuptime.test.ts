@@ -31,9 +31,9 @@ import {
 } from "./fake-oneuptime.js";
 
 // The example checkout's monitors (defaults applied):
-//   shop.example.com/healthcheck/, shop.example.net/healthcheck/ (public, deploy target)
-//   staging-shop.example.com/healthcheck/ (staff, deploy target: bypassed)
-//   tools.example.net/api/health (staff, /api open to a service token only: weak; accept app 404)
+//   shop.example.com/healthcheck/, shop.example.net/healthcheck/ ("/" open to everyone; /healthcheck/ too)
+//   staging-shop.example.com/healthcheck/ (staff site, "/healthcheck/": [everyone])
+//   tools.example.net/api/health (staff site, /api open to a service token only: weak; accept app 404)
 const EXAMPLE_KEYS = ["shop.example.com/healthcheck/", "shop.example.net/healthcheck/", "staging-shop.example.com/healthcheck/", "tools.example.net/api/health"];
 
 async function config(changes: Record<string, string | null> = {}): Promise<InfraConfig> {
@@ -225,23 +225,26 @@ describe("oneuptime plan", () => {
     expect(tools.criteria[2]).toMatch(new RegExp(`^${CRITERION.offline}`));
   });
 
-  it("warns when a monitor can only see the staff login", async () => {
+  it("warns when a monitor's path is open only to a service token (the example's tools /api/health)", async () => {
     const d = await desired();
     const weak = planMonitors(d, await observe(d)).diagnostics.filter((x) => x.code === "monitor-health-weak");
     expect(weak).toEqual([expect.objectContaining({ level: "warning", droplet: "tools.example.net", file: "droplets/tools.example.net.yaml" })]);
-    expect(weak[0]!.message).toContain("staff login (302)");
+    expect(weak[0]!.message).toBe(
+      "/api/health on tools.example.net is open only to service tokens or IP ranges (web.access /api): the monitor is refused whatever the app does",
+    );
   });
 
-  it("warns on a public site's health path under a protected path; not for an exception open to everyone", async () => {
+  it("warns when a monitor can only see the staff login: a health path under a login rule; not under a rule open to everyone", async () => {
     const d = await desired({
       "droplets/shop.example.com.yaml": [
         "name: shop.example.com",
         "ssh: [admins]",
         "env: prod",
-        "deploy: true",
         "web:",
-        "  exposure: public",
         "  health_path: /admin/health",
+        "  access:",
+        "    /: [everyone]",
+        "    /admin: [staff]",
         "monitors:",
         "  - hostname: shop.example.com",
         "  - hostname: shop.example.com",
@@ -252,15 +255,114 @@ describe("oneuptime plan", () => {
         "ssh: [admins]",
         "env: internal",
         "web:",
-        "  exposure: staff",
         "  health_path: /status",
-        "  exceptions:",
-        "    - path: /status",
-        "      allow: everyone",
+        "  access:",
+        "    /: [staff]",
+        "    /status: [everyone]",
       ].join("\n"),
     });
     const weak = planMonitors(d, await observe(d)).diagnostics.filter((x) => x.code === "monitor-health-weak");
-    expect(weak.map((w) => w.message)).toEqual([expect.stringContaining("/admin/health is under a protected path of shop.example.com")]);
+    expect(weak.map((w) => [w.droplet, w.message])).toEqual([
+      [
+        "shop.example.com",
+        "/admin/health on shop.example.com needs a login (web.access /admin): the monitor only sees the staff login (302), so it stays up while the app is down",
+      ],
+    ]);
+  });
+
+  it("warns on a staff site's root, and on a group or email rule: both need a login", async () => {
+    const d = await desired({
+      "droplets/tools.example.net.yaml": [
+        "name: tools.example.net",
+        "ssh: [admins]",
+        "env: internal",
+        "web:",
+        "  access:",
+        "    /: [staff]",
+        "    /reports: [shop-team, tools-owner@example.com]",
+        "monitors:",
+        "  - hostname: tools.example.net",
+        "  - hostname: tools.example.net",
+        "    path: /reports/daily",
+      ].join("\n"),
+    });
+    const weak = planMonitors(d, await observe(d)).diagnostics.filter((x) => x.code === "monitor-health-weak" && x.droplet === "tools.example.net");
+    expect(weak.map((w) => w.message)).toEqual([
+      expect.stringMatching(/^\/ on tools\.example\.net needs a login \(web\.access \/\): .*staff login \(302\)/),
+      expect.stringMatching(/^\/reports\/daily on tools\.example\.net needs a login \(web\.access \/reports\)/),
+    ]);
+  });
+
+  it("warns on a path open only to IP ranges, and on a token rule mixed with an IP", async () => {
+    const d = await desired({
+      "droplets/tools.example.net.yaml": [
+        "name: tools.example.net",
+        "ssh: [admins]",
+        "env: internal",
+        "web:",
+        "  health_path: /partner/health",
+        "  access:",
+        "    /: [everyone]",
+        "    /partner: [ip:198.51.100.0/24, token:uptime]",
+        "    /office: [ip:192.0.2.10]",
+        "monitors:",
+        "  - hostname: tools.example.net",
+        "  - hostname: tools.example.net",
+        "    path: /office",
+      ].join("\n"),
+    });
+    const weak = planMonitors(d, await observe(d)).diagnostics.filter((x) => x.code === "monitor-health-weak" && x.droplet === "tools.example.net");
+    expect(weak.map((w) => w.message)).toEqual([
+      "/partner/health on tools.example.net is open only to service tokens or IP ranges (web.access /partner): the monitor is refused whatever the app does",
+      "/office on tools.example.net is open only to service tokens or IP ranges (web.access /office): the monitor is refused whatever the app does",
+    ]);
+  });
+
+  it("warns when a login path is monitored on an extra hostname of a site open to everyone: the tunnel answers 404 there", async () => {
+    const d = await desired({
+      "droplets/shop.example.com.yaml": [
+        "name: shop.example.com",
+        "ssh: [admins]",
+        "env: prod",
+        "web:",
+        "  hostnames: [shop.example.net]",
+        "  access:",
+        "    /: [everyone]",
+        "    /admin: [staff]",
+        "monitors:",
+        "  - hostname: shop.example.com",
+        "    path: /",
+        "  - hostname: shop.example.net",
+        "    path: /",
+        "  - hostname: shop.example.net",
+        "    path: /admin/health",
+      ].join("\n"),
+    });
+    const weak = planMonitors(d, await observe(d)).diagnostics.filter((x) => x.code === "monitor-health-weak" && x.droplet === "shop.example.com");
+    expect(weak.map((w) => w.message)).toEqual([
+      "/admin/health needs a login on shop.example.com, so the tunnel answers 404 for it on shop.example.net: the monitor never sees the app",
+    ]);
+  });
+
+  it("/healthcheck/ open to everyone counts on the droplet's own name only: on an extra hostname of a staff site it is weak", async () => {
+    const d = await desired({
+      "droplets/tools.example.net.yaml": [
+        "name: tools.example.net",
+        "ssh: [admins]",
+        "env: internal",
+        "web:",
+        "  hostnames: [tools-brand.example.com]",
+        "  access:",
+        "    /: [staff]",
+        "    /healthcheck/: [everyone]",
+      ].join("\n"),
+    });
+    const tools = d.droplets.find((x) => x.name === "tools.example.net")!;
+    expect(tools.monitors.map((m) => `${m.hostname}${m.path}`)).toEqual(["tools.example.net/healthcheck/", "tools-brand.example.com/healthcheck/"]);
+    const weak = planMonitors(d, await observe(d)).diagnostics.filter((x) => x.code === "monitor-health-weak" && x.droplet === "tools.example.net");
+    expect(weak.map((w) => w.message)).toEqual([
+      "/healthcheck/ on tools-brand.example.com needs a login (web.access /): the monitor only sees the staff login (302), so it stays up while the app is down",
+    ]);
   });
 
   it("is unchanged after apply: plan, apply, observe again, plan shows no ops", async () => {

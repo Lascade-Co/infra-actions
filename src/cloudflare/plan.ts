@@ -3,13 +3,12 @@
 // The input changes from DigitalOcean tags + web-config.json to the desired state built from the
 // droplet files (adaptDroplets below). Everything after the adapter follows the Worker step by
 // step, so that a plan against what the Worker built shows no change (phase D). New here:
-// allow.tunnel routes (planRoutes) and exceptions with service tokens (bodies.ts), and per-droplet
-// SSH access (decision 18): one infrastructure app per distinct access set in place of the
-// Worker's single app, targets tagged with their set, each ssh- app for the droplet's own list.
+// allow.tunnel routes (planRoutes), per-droplet SSH access (decision 18: one infrastructure app per
+// distinct access set in place of the Worker's single app, targets tagged with their set, each ssh-
+// app for the droplet's own list) and web access rules (decision 19: web.access who-lists in place
+// of the web tags and web-config.json; the Worker's sites map onto them without a change).
 
 import {
-  CI_DEPLOY_TAG,
-  DEFAULT_PROTECTED_PATHS,
   DNS_COMMENT_MARKER,
   HEALTH_BYPASS_PATH,
   KNOWN_AFTER_CREATE,
@@ -20,11 +19,10 @@ import {
   TARGET_TAG_VALUE,
   WEB_ADMIN_APP_PREFIX,
   WEB_APP_PREFIX,
-  WEB_PUBLIC_TAG,
-  WEB_STAFF_TAG,
+  WEB_EXCEPTION_APP_PREFIX,
 } from "../core/constants.js";
-import type { DesiredDroplet, DesiredState } from "../core/desired.js";
-import type { AccountConfig, EnvName, WebException, WebSpec, Who } from "../core/model.js";
+import { pathUnder, resolvePeople, type DesiredAccess, type DesiredDroplet, type DesiredState, type DesiredWeb } from "../core/desired.js";
+import type { AccountConfig, EnvName, Who } from "../core/model.js";
 import { flattenName } from "../core/naming.js";
 import { normPath } from "../core/values.js";
 import {
@@ -52,6 +50,7 @@ import {
   lc,
   normCriteria,
   normPolicies,
+  type ResolvedWho,
   routeAppBody,
   sameTags,
   sameWebApp,
@@ -67,11 +66,9 @@ import {
   vpcBody,
   type WebAppBody,
   type WebAppKind,
-  webAdminAppBody,
+  webAccessAppBody,
   webAppKind,
-  webExceptionAppBody,
   webIngress,
-  webSiteAppBody,
   withPolicyIds,
 } from "./bodies.js";
 import { findDependents, type SiteHosts } from "./dependents.js";
@@ -94,10 +91,8 @@ export interface Snapshot {
   zoneDns: Record<string, DnsRecord[] | ReadError>;
 }
 
-/** The Worker's SyncConfig, from account.yaml. */
+/** The Worker's SyncConfig, from account.yaml (plus what who-lists resolve against). */
 export interface Cfg {
-  /** Service token ids per environment, deduplicated and sorted (the Worker's CI_SERVICE_TOKEN_IDS). */
-  ciTokens: Record<EnvName, string[]>;
   /** Lowercase. */
   staffPolicyId: string;
   maxDeletes: number;
@@ -105,6 +100,8 @@ export interface Cfg {
   /** name -> token id */
   serviceTokens: Record<string, string>;
   tunnelsByRegion: Record<string, string>;
+  /** account.yaml groups and email_domain (who-lists). */
+  account: AccountConfig;
 }
 
 /** A droplet as the planner sees it (the Worker's Droplet, built from a droplet file). */
@@ -113,11 +110,9 @@ export interface Drop {
   region: string;
   /** KNOWN_AFTER_CREATE for a droplet the tool is about to create. */
   privateIp?: string;
-  /** Managed tags from the file (env-*, ci-deploy, web-*). Empty for a droplet with no file. */
-  tags: string[];
   publicIps: string[];
-  /** Its site config (droplet file `web:`), the Worker's web-config.json entry. */
-  site?: WebSpec;
+  /** Its site (droplet file `web:`, defaults applied): the Worker's web tag + web-config.json entry. */
+  site?: DesiredWeb;
   /** Undefined for a droplet with no file: reported by the engine, held here. */
   dd?: DesiredDroplet;
   /** Planned and its ops are pending (status create). */
@@ -168,13 +163,14 @@ export interface WebSitePlan {
   zone: string;
   zoneId: string;
   tunnelId: string;
-  tag: typeof WEB_STAFF_TAG | typeof WEB_PUBLIC_TAG;
-  /** The route. For an extra hostname of a public site it carries notFoundPaths. */
+  /** web.access "/" is [everyone]: no Access app on the root (the Worker's web-public). */
+  rootOpen: boolean;
+  /** The route. For an extra hostname of a site whose "/" is [everyone] it carries notFoundPaths. */
   ingress: IngressTarget;
   apps: WebAppPlan[];
   /** undefined while another record holds the name (awaiting cutover), and for implicit hostnames */
   dns?: { op: Op; existingId?: string; existing?: DnsRecord; body: DnsBody };
-  /** an "infra-sync: web H" (whole-host, staff) app existed before this run */
+  /** an "infra-sync: web H" (whole-host) app existed before this run */
   hasHostApp: boolean;
   source: "base" | "declared" | "implicit";
   healthPath: string;
@@ -193,6 +189,8 @@ export interface HostPlan {
   target: { op: Op; existingId?: string; existing?: InfraTarget; body: TargetBody };
   /** The droplet's SSH access list, resolved (lowercase, sorted), and its set id (the ssh-access tag). */
   sshEmails: string[];
+  /** The ssh list has staff: everyone with an address in this domain. */
+  staffDomain?: string;
   setId: string;
   /** Frozen droplet: its ops become report ops, except its SSH access (frozenTarget, frozenApp). */
   frozen: boolean;
@@ -333,14 +331,13 @@ export function snapshotFrom(observed: CloudflareObserved): Snapshot {
 
 export function cfgFrom(account: AccountConfig): Cfg {
   const cf = account.cloudflare;
-  const ids = (names: readonly string[] | undefined) => [...new Set((names ?? []).flatMap((n) => (cf.service_tokens[n] ? [cf.service_tokens[n]!] : [])))].sort();
   return {
-    ciTokens: { prod: ids(cf.ci_deploy_tokens.prod), staging: ids(cf.ci_deploy_tokens.staging), internal: ids(cf.ci_deploy_tokens.internal) },
     staffPolicyId: cf.staff_policy_id.trim().toLowerCase(),
     maxDeletes: cf.guards.max_deletes,
     maxDeleteFraction: cf.guards.max_delete_fraction,
     serviceTokens: { ...cf.service_tokens },
     tunnelsByRegion: { ...cf.tunnels },
+    account,
   };
 }
 
@@ -350,21 +347,18 @@ export function adaptDroplets(desired: DesiredState): Drop[] {
     name: dd.name,
     region: dd.region ?? "",
     ...(dd.status === "create" ? { privateIp: KNOWN_AFTER_CREATE } : dd.privateIpv4 ? { privateIp: dd.privateIpv4 } : {}),
-    tags: dd.tags,
     publicIps: [dd.observed?.publicIpv4, dd.observed?.publicIpv6].filter((x): x is string => !!x),
-    ...(dd.spec.web ? { site: dd.spec.web } : {}),
+    ...(dd.web ? { site: dd.web } : {}),
     dd,
     pending: dd.status === "create",
   }));
   for (const u of desired.unmanaged) {
-    out.push({ name: u.name, region: u.region, ...(u.privateIpv4 ? { privateIp: u.privateIpv4 } : {}), tags: [], publicIps: [], pending: false });
+    out.push({ name: u.name, region: u.region, ...(u.privateIpv4 ? { privateIp: u.privateIpv4 } : {}), publicIps: [], pending: false });
   }
   return out;
 }
 
 // ---------- planning ----------
-
-const ENV_BY_TAG: Record<string, EnvName> = { "env-prod": "prod", "env-staging": "staging", "env-internal": "internal" };
 
 export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
   const diagnostics: Diag[] = [];
@@ -404,10 +398,13 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     sshHostname: string;
     vpcHostname: string;
     env?: EnvName;
+    /** The ssh list's service tokens (ids): Service Auth on the ssh- app. */
     tokenIds: string[];
-    ciDeploy: boolean;
-    tags: string[];
+    /** web.access opens /healthcheck/ to everyone: the healthcheck bypass app (4c). */
+    publicHealthcheck: boolean;
     sshEmails: string[];
+    /** The ssh list has staff: the account's email domain. */
+    staffDomain?: string;
     frozen: boolean;
     drop: Drop;
     pending: boolean;
@@ -440,7 +437,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       heldVpcNames.add(f.vpcHostname);
       continue;
     }
-    if (!d.dd.sshEmails.length) {
+    if (!d.dd.sshEmails.length && !d.dd.sshStaff) {
       // The checks reject this (an unknown group); never build an app that lets no one in.
       skipped(d.name, "its ssh list names no one (an unknown group?); its SSH target and Access apps are left as they are");
       heldNames.add(d.name);
@@ -448,20 +445,9 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       heldVpcNames.add(f.vpcHostname);
       continue;
     }
-    const tags = d.tags;
-    const envs = [...new Set(tags.filter((t) => t in ENV_BY_TAG).map((t) => ENV_BY_TAG[t]!))];
-    const env = envs.length === 1 ? envs[0] : undefined;
-    if (envs.length > 1) warn(`${d.name}: several env-* tags (${envs.join(", ")})`, d.name);
-    let tokenIds: string[] = [];
-    if (tags.includes(CI_DEPLOY_TAG)) {
-      if (!env) {
-        warn(`${d.name}: deploy: true but no env; no CI service-token policy added`, d.name);
-      } else if (!cfg.ciTokens[env].length) {
-        warn(`${d.name}: deploy: true (${env}) but account.cloudflare.ci_deploy_tokens.${env} is empty; no CI service-token policy added`, d.name);
-      } else {
-        tokenIds = cfg.ciTokens[env];
-      }
-    }
+    const env = d.dd.env;
+    // Unknown names are an error in src/checks; they add nothing here.
+    const tokenIds = [...new Set(d.dd.sshTokens.flatMap((n) => (cfg.serviceTokens[n] ? [lc(cfg.serviceTokens[n])] : [])))].sort();
     cands.push({
       name: d.name,
       privateIp: ip,
@@ -473,9 +459,9 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       vpcHostname: f.vpcHostname,
       ...(env ? { env } : {}),
       tokenIds,
-      ciDeploy: tags.includes(CI_DEPLOY_TAG),
-      tags,
+      publicHealthcheck: !!d.dd.web?.publicHealthcheck,
       sshEmails: d.dd.sshEmails,
+      ...(d.dd.sshStaff ? { staffDomain: cfg.account.email_domain } : {}),
       frozen: d.dd.frozen,
       drop: d,
       pending: d.pending,
@@ -592,7 +578,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       heldHostnames.add(c.sshHostname);
       continue;
     }
-    const setId = sshAccessSetId(c.sshEmails);
+    const setId = sshAccessSetId(c.sshEmails, c.staffDomain);
     // A renamed droplet keeps its private IP: update its target in place (a second target with the
     // same IP is refused by the API), unless a droplet with the old name still exists.
     const existingT =
@@ -626,6 +612,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       ...(c.env ? { env: c.env } : {}),
       target,
       sshEmails: c.sshEmails,
+      ...(c.staffDomain ? { staffDomain: c.staffDomain } : {}),
       setId,
       frozen: c.frozen,
       ...(frozenTarget ? { frozenTarget } : {}),
@@ -654,7 +641,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
       continue;
     }
 
-    const aBody = appBody(h, c.sshEmails, c.tokenIds, c.env);
+    const aBody = appBody(h, c.sshEmails, c.tokenIds, c.env, c.staffDomain);
     const existingA = ownedAppByHost.get(h)?.[0];
     if (!existingA) hp.app = { op: "create", body: aBody };
     else {
@@ -663,7 +650,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
         ? { op: "noop", existingId: existingA.id, existing: existingA, body: aBody }
         : { op: "update", existingId: existingA.id, existing: existingA, body: { ...aBody, policies: withPolicyIds(aBody.policies, existingA.policies) } };
       // Frozen: only the people on its ssh- app change (the rest stays report-only).
-      const listOnly = c.frozen && !same ? sshListOnlyAppBody(existingA, c.sshEmails) : undefined;
+      const listOnly = c.frozen && !same ? sshListOnlyAppBody(existingA, c.sshEmails, c.staffDomain) : undefined;
       if (listOnly && normPolicies(listOnly.policies) !== normPolicies(existingA.policies)) {
         hp.frozenApp = { existingId: existingA.id, existing: existingA, body: listOnly };
       }
@@ -729,7 +716,8 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     else if (!heldVpcNames.has(name)) staleVpcDns.push(...owned);
   }
 
-  // 4c. Public /healthcheck for deploy targets. Independent of tunnels, targets and DNS.
+  // 4c. Public /healthcheck (web.access "/healthcheck/": [everyone]) on the droplet's own name.
+  // Independent of tunnels, targets and DNS.
   const ownedHealth = snap.apps.filter(isOwnedHealthApp);
   const ownedHealthByDomain = new Map<string, AccessApp[]>();
   for (const a of ownedHealth) {
@@ -743,9 +731,13 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
   const health: HealthPlan[] = [];
   const heldHealth = new Set<string>(); // domains kept but not managed this run
   for (const n of heldNames) heldHealth.add(lc(`${n}/${HEALTH_BYPASS_PATH}`));
+  // A droplet with no web section keeps the bypass it has (like its site objects, step 4d): the
+  // Worker gave one to every deploy target, with a site or not, and only web.access can ask for it.
+  // Without an Access app on its host it changes nothing; remove it by hand if it is not wanted.
+  for (const c of unique) if (!c.drop.site) heldHealth.add(lc(`${c.name}/${HEALTH_BYPASS_PATH}`));
   for (const c of unique) {
     const domain = lc(`${c.name}/${HEALTH_BYPASS_PATH}`);
-    if (!c.ciDeploy) continue;
+    if (!c.publicHealthcheck) continue;
     const foreign = foreignDestinations.get(domain);
     if (foreign) {
       warn(`${c.name}: Access app "${foreign}" already covers ${domain}; the healthcheck bypass is left to it`, c.name);
@@ -785,7 +777,7 @@ export function buildPlan(snap: Snapshot, cfg: Cfg, drops: Drop[]): Plan {
     snap,
     cfg,
     drops,
-    unique.map((c) => ({ name: c.name, privateIp: c.privateIp, tunnelId: c.tunnelId, tags: c.tags, ciDeploy: c.ciDeploy, pending: c.pending })),
+    unique.map((c) => ({ name: c.name, privateIp: c.privateIp, tunnelId: c.tunnelId, pending: c.pending })),
     tunnelErrors,
     routes.routeHosts,
     { diag, conflict, skipped, warn, readError },
@@ -988,9 +980,9 @@ function planInfraApps(
   warn: (message: string, droplet?: string) => void,
 ): InfraResult {
   const owned = snap.apps.filter(isOwnedInfraApp);
-  const sets = new Map<string, { emails: string[]; droplets: string[] }>();
+  const sets = new Map<string, { emails: string[]; staffDomain?: string; droplets: string[] }>();
   for (const h of hosts) {
-    const set = sets.get(h.setId) ?? { emails: h.sshEmails, droplets: [] };
+    const set = sets.get(h.setId) ?? { emails: h.sshEmails, ...(h.staffDomain ? { staffDomain: h.staffDomain } : {}), droplets: [] };
     set.droplets.push(h.name);
     sets.set(h.setId, set);
   }
@@ -998,7 +990,7 @@ function planInfraApps(
   const managed = new Set<string>();
   for (const setId of [...sets.keys()].sort()) {
     const set = sets.get(setId)!;
-    const body = infraAppBody(setId, set.emails);
+    const body = infraAppBody(setId, set.emails, set.staffDomain);
     const existing = owned.find((a) => a.name === body.name);
     const base = { setId, emails: set.emails, droplets: [...set.droplets].sort() };
     if (!existing) {
@@ -1055,8 +1047,6 @@ export interface WebCand {
   name: string;
   privateIp: string;
   tunnelId: string;
-  tags: string[];
-  ciDeploy: boolean;
   pending: boolean;
 }
 
@@ -1101,9 +1091,9 @@ export function planWeb(
 ): WebResult {
   const zoneNames = snap.zones.map((z) => lc(z.name));
   const zoneIdByName = new Map(snap.zones.map((z) => [lc(z.name), z.id]));
-  const sitesCfg: Record<string, WebSpec> = {};
+  const sitesCfg: Record<string, DesiredWeb> = {};
   for (const d of drops) if (d.site) sitesCfg[lc(d.name)] = d.site;
-  const hostnamesOf = (n: string) => sitesCfg[n]?.hostnames ?? [];
+  const hostnamesOf = (n: string) => sitesCfg[n]?.extraHostnames ?? [];
 
   // Every record of every zone, by name. A zone that could not be read blocks its site hostnames
   // (we cannot prove a name is free) and all deletions.
@@ -1137,14 +1127,11 @@ export function planWeb(
   }
 
   const ownerByHost = new Map<string, string>();
-  for (const [name, s] of Object.entries(sitesCfg)) for (const h of s.hostnames) ownerByHost.set(lc(h), lc(name));
+  for (const [name, s] of Object.entries(sitesCfg)) for (const h of s.extraHostnames) ownerByHost.set(lc(h), lc(name));
   const ownerOf = (h: string) => ownerByHost.get(lc(h)) ?? lc(h);
   const dropletNames = new Set(drops.map((d) => lc(d.name)));
-  const tagsByName = new Map(drops.map((d) => [lc(d.name), d.tags]));
-  const webTagOf = (tags: string[]) => {
-    const t = [WEB_STAFF_TAG, WEB_PUBLIC_TAG].filter((x) => tags.includes(x));
-    return t.length === 1 ? t[0] : undefined;
-  };
+  /** The droplet has a site (a web section): the Worker's web tag. */
+  const hasSite = (name: string) => Object.hasOwn(sitesCfg, lc(name));
 
   // Guard rail 1: names in any zone that point at a site ("dependents"). Worked out before ownership,
   // because an implicit extra hostname (a proxied CNAME to a site hostname) is owned by the same
@@ -1155,7 +1142,7 @@ export function planWeb(
   };
   const siteHosts: SiteHosts[] = [];
   for (const d of drops) {
-    if (!webTagOf(d.tags)) continue;
+    if (!d.site) continue;
     const n = lc(d.name);
     const hosts = [n, ...hostnamesOf(n).map(lc)].filter((h) => !isReservedName(h) && oneLevel(h));
     siteHosts.push({ site: n, hosts, publicIps: d.publicIps });
@@ -1204,8 +1191,8 @@ export function planWeb(
   // cutover, so nothing else could prove it. Never a droplet's own name (any droplet's), never ssh-/vpc-.
   const declaredHosts = new Set<string>();
   for (const [name, s] of Object.entries(sitesCfg)) {
-    if (!dropletNames.has(lc(name)) || !webTagOf(tagsByName.get(lc(name)) ?? [])) continue;
-    for (const raw of s.hostnames) {
+    if (!dropletNames.has(lc(name))) continue;
+    for (const raw of s.extraHostnames) {
       const h = lc(raw);
       if (!isReservedName(h) && !dropletNames.has(h)) declaredHosts.add(h);
     }
@@ -1237,19 +1224,13 @@ export function planWeb(
   }
 
   // 1. Which droplet claims which site hostname.
-  type Claim = { cand: WebCand; tag: WebSitePlan["tag"]; zone: string; zoneId: string; site: WebSpec | undefined; source: WebSitePlan["source"] };
+  type Claim = { cand: WebCand; zone: string; zoneId: string; site: DesiredWeb; source: WebSitePlan["source"] };
   const claims = new Map<string, Claim[]>();
   for (const c of cands) {
-    const staff = c.tags.includes(WEB_STAFF_TAG);
-    const pub = c.tags.includes(WEB_PUBLIC_TAG);
-    if (!staff && !pub) continue;
-    if (staff && pub) {
-      out.warn(`${c.name}: both ${WEB_STAFF_TAG} and ${WEB_PUBLIC_TAG}; its site is treated as having none (nothing created, existing site objects kept)`, c.name);
-      continue;
-    }
     const site = sitesCfg[lc(c.name)];
-    const declared = new Set((site?.hostnames ?? []).map(lc));
-    for (const raw of [c.name, ...(site?.hostnames ?? []), ...(implicitBySite.get(lc(c.name)) ?? [])]) {
+    if (!site) continue;
+    const declared = new Set(site.extraHostnames.map(lc));
+    for (const raw of [c.name, ...site.extraHostnames, ...(implicitBySite.get(lc(c.name)) ?? [])]) {
       const h = lc(raw);
       const source: WebSitePlan["source"] = h === lc(c.name) ? "base" : declared.has(h) ? "declared" : "implicit";
       if (isReservedName(h)) {
@@ -1269,7 +1250,7 @@ export function planWeb(
         continue;
       }
       const list = claims.get(h) ?? [];
-      if (!list.some((x) => x.cand.name === c.name)) list.push({ cand: c, tag: staff ? WEB_STAFF_TAG : WEB_PUBLIC_TAG, zone: f.zone, zoneId: zoneIdByName.get(f.zone)!, site, source });
+      if (!list.some((x) => x.cand.name === c.name)) list.push({ cand: c, zone: f.zone, zoneId: zoneIdByName.get(f.zone)!, site, source });
       claims.set(h, list);
     }
   }
@@ -1284,7 +1265,7 @@ export function planWeb(
       blockedHosts.add(h);
       continue;
     }
-    const { cand: c, tag, zone, zoneId, site, source } = list[0]!;
+    const { cand: c, zone, zoneId, site, source } = list[0]!;
     if (tunnelErrors.has(c.tunnelId) || dnsErrorZones.has(zoneId)) {
       const why = tunnelErrors.has(c.tunnelId) ? `tunnel ${c.tunnelId} configuration unavailable` : `DNS records of zone ${zone} unavailable`;
       out.skipped(c.name, `site ${h} not managed this run: ${why}`);
@@ -1297,43 +1278,51 @@ export function planWeb(
       continue;
     }
 
-    // Path apps. <droplet name>/healthcheck of a deploy target belongs to the healthcheck bypass.
+    // Path apps from web.access. The public /healthcheck/ is its own app on the droplet's own name
+    // (step 4c) and is not built on extra hostnames (its parent's rule applies there).
     const isBase = h === lc(c.name);
-    const healthDest = c.ciDeploy && isBase ? lc(`${h}/${HEALTH_BYPASS_PATH}`) : undefined;
-    type PathApp = { kind: "admin" | "exception"; path: string; dest: string; exc?: WebException };
+    const healthNorm = `/${HEALTH_BYPASS_PATH}`;
+    const rootRule = site.access.find((a) => a.norm === "");
+    type PathApp = { kind: "admin" | "exception"; rule: DesiredAccess; dest: string; gating: boolean };
     const pathApps: PathApp[] = [];
-    // Public: the staff login on the droplet's own name; on extra hostnames the protected paths
-    // answer 404 in the tunnel (rules in the same document as the route, so they need no gating app).
+    // On an extra hostname of a site whose "/" is [everyone], a path that needs a login answers 404 in
+    // the tunnel (rules in the same document as the route, so they need no gating app): brand domains
+    // never show the staff login page.
     const notFoundPaths: string[] = [];
-    if (tag === WEB_PUBLIC_TAG) {
-      for (const p of site?.protected_paths ?? DEFAULT_PROTECTED_PATHS) {
-        if (isBase) pathApps.push({ kind: "admin", path: p, dest: h + normPath(p) });
-        else notFoundPaths.push(p);
+    for (const a of site.access) {
+      if (a.norm === "" || (a.norm === healthNorm && a.everyone)) continue;
+      if (site.rootOpen && !isBase && a.needsLogin) {
+        notFoundPaths.push(a.path);
+        continue;
       }
-    } else if (site?.protected_paths) {
-      out.warn(`${h}: protected_paths only apply to public sites; ignored (the whole site needs the staff login)`, c.name);
+      // Gating: the app keeps someone out whom the rule above it lets in (a login, or a token or IP
+      // list under a path open to everyone), so the route must not go up before it.
+      const parent = site.access
+        .filter((p) => p !== a && pathUnder(a.norm, p.norm) && !(p.norm === healthNorm && p.everyone && !isBase))
+        .sort((x, y) => y.norm.length - x.norm.length)[0];
+      const gating = a.needsLogin || (!a.everyone && !!parent?.everyone);
+      pathApps.push({ kind: a.needsLogin ? "admin" : "exception", rule: a, dest: h + a.norm, gating });
     }
-    for (const e of site?.exceptions ?? []) pathApps.push({ kind: "exception", path: e.path, dest: h + normPath(e.path), exc: e });
-    const usable = pathApps.filter((x) => {
-      if (x.dest !== healthDest) return true;
-      out.warn(`${h}${x.path}: is the public healthcheck bypass of a deploy target; not used as ${x.kind === "admin" ? "a protected path" : "an exception"}`, c.name);
-      return false;
-    });
 
     // Fail closed: a route or gating Access app the tool does not own => nothing for this hostname.
     const reasons: string[] = [];
     if (foreignIngress.has(h)) reasons.push(`tunnel ${foreignIngress.get(h)} has an ingress rule for ${h} that the tool does not own`);
-    const gating: Array<{ dest: string; name: string }> =
-      tag === WEB_STAFF_TAG
-        ? [{ dest: h, name: WEB_APP_PREFIX + h }]
-        : usable.filter((x) => x.kind === "admin").map((x) => ({ dest: x.dest, name: `${WEB_ADMIN_APP_PREFIX}${h}${x.path}` }));
+    const appName = (x: PathApp) => `${x.kind === "admin" ? WEB_ADMIN_APP_PREFIX : WEB_EXCEPTION_APP_PREFIX}${h}${x.rule.path}`;
+    const gating: Array<{ dest: string; name: string }> = [
+      ...(site.rootOpen ? [] : [{ dest: h, name: WEB_APP_PREFIX + h }]),
+      ...pathApps.filter((x) => x.gating).map((x) => ({ dest: x.dest, name: appName(x) })),
+    ];
     for (const g of gating) {
       const f = foreignDest.get(g.dest);
       if (f) reasons.push(`Access app "${f}" already covers ${g.dest}; rename it to "${g.name}" to let the tool adopt it, or delete it`);
     }
     if (!gating.length && !notFoundPaths.length) {
-      // e.g. public, whose only protected path is the healthcheck bypass: the route would have no login at all.
-      out.warn(`${h}: public site has no usable protected path; nothing created for it`, c.name);
+      // e.g. "/": [everyone] and nothing that needs a login: no Access app and no 404 rule would prove
+      // the route is the tool's (the Worker refused such a site too).
+      out.warn(
+        `${h}: web.access opens the whole site to everyone and nothing on it needs a login, so no Access app or 404 rule would mark its route as the tool's; nothing created for it (add a path that needs a login, e.g. "/admin": [staff])`,
+        c.name,
+      );
       blockedHosts.add(h);
       continue;
     }
@@ -1342,6 +1331,18 @@ export function planWeb(
       blockedHosts.add(h);
       continue;
     }
+
+    const resolve = (a: DesiredAccess): ResolvedWho | string => {
+      const unknown = [...new Set(a.who.flatMap((w) => (w.kind === "token" && !cfg.serviceTokens[w.name] ? [w.name] : [])))];
+      if (unknown.length) return `service token ${unknown.join(", ")} is not in account.cloudflare.service_tokens`;
+      return {
+        everyone: a.everyone,
+        staff: a.who.some((w) => w.kind === "staff"),
+        emails: resolvePeople(cfg.account, a.who),
+        ips: [...new Set(a.who.flatMap((w) => (w.kind === "ip" ? [w.cidr] : [])))].sort(),
+        tokenIds: [...new Set(a.who.flatMap((w) => (w.kind === "token" ? [lc(cfg.serviceTokens[w.name])] : [])))].sort(),
+      };
+    };
 
     const apps: WebAppPlan[] = [];
     const addApp = (kind: WebAppKind, destination: string, body: WebAppBody, isGating: boolean) => {
@@ -1356,30 +1357,41 @@ export function planWeb(
       const policies = body.policies.map((p) => (isLink(p) ? p : withPolicyIds([p], inlineExisting)[0]!));
       return apps.push({ ...base, op: "update", existingId: existing.id, ...ek, existing, body: { ...body, policies } });
     };
-    // Exception apps first, then the gating apps. On a host that is already proxied the login applies
-    // as soon as a gating app exists, so creating the exceptions first keeps webhooks and other machine
-    // paths from getting the login in between.
-    for (const x of usable) {
-      if (x.kind !== "exception") continue;
+    // Paths open without a login first, then the gating apps. On a host that is already proxied the
+    // login applies as soon as a gating app exists, so creating the open paths first keeps webhooks
+    // and other machine paths from getting the login in between.
+    for (const x of pathApps) {
+      if (x.gating) continue;
       const f = foreignDest.get(x.dest);
       if (f) {
-        out.warn(`${c.name}: Access app "${f}" already covers ${x.dest}; the exception is left to it`, c.name);
+        out.warn(`${c.name}: Access app "${f}" already covers ${x.dest}; the path ${x.rule.path} is left to it`, c.name);
         continue;
       }
-      const exc = x.exc!;
-      const names = exc.allow === "everyone" ? [] : (exc.allow.service_tokens ?? []);
-      const unknown = names.filter((n) => !cfg.serviceTokens[n]);
-      if (unknown.length) {
-        out.warn(`${h}${x.path}: service token ${unknown.join(", ")} is not in account.cloudflare.service_tokens; the exception is not built`, c.name);
+      const who = resolve(x.rule);
+      if (typeof who === "string") {
+        out.warn(`${h}${x.rule.path}: ${who}; its Access app is not built`, c.name);
         continue;
       }
-      const tokenIds = [...new Set(names.map((n) => cfg.serviceTokens[n]!))].sort();
-      addApp("exception", x.dest, webExceptionAppBody(h, exc, tokenIds), false);
+      addApp(x.kind, x.dest, webAccessAppBody(x.kind, h, x.rule.path, who, cfg.staffPolicyId), false);
     }
-    if (tag === WEB_STAFF_TAG) addApp("site", h, webSiteAppBody(h, cfg.staffPolicyId), true);
-    for (const x of usable) {
-      if (x.kind === "admin") addApp("admin", x.dest, webAdminAppBody(h, x.path, cfg.staffPolicyId), true);
+    // A gating app that can't be resolved blocks the hostname's new route (fail closed): the apps
+    // already there stay as they are, and the route only goes up with every gating app in place.
+    let unresolved: string | undefined;
+    const gatingApps: Array<{ kind: WebAppKind; dest: string; body: WebAppBody }> = [];
+    for (const x of [...(rootRule && !site.rootOpen ? [{ kind: "site" as const, rule: rootRule, dest: h }] : []), ...pathApps.filter((p) => p.gating)]) {
+      const who = resolve(x.rule);
+      if (typeof who === "string") {
+        unresolved = `${h}${x.rule.path === "/" ? "" : x.rule.path}: ${who}`;
+        break;
+      }
+      gatingApps.push({ kind: x.kind, dest: x.dest, body: webAccessAppBody(x.kind, h, x.rule.path, who, cfg.staffPolicyId) });
     }
+    if (unresolved) {
+      out.warn(`${unresolved}; nothing created for ${h}`, c.name);
+      blockedHosts.add(h);
+      continue;
+    }
+    for (const g of gatingApps) addApp(g.kind, g.dest, g.body, true);
 
     // DNS: create the CNAME only when nothing else holds the name (cutover).
     const recs = recsByName.get(h) ?? [];
@@ -1403,12 +1415,15 @@ export function planWeb(
       dns = { op: "create", body: dBody };
     }
 
-    // Health path: a warning when it sits under a protected path (the watch would only see the login).
-    const healthPath = site?.health_path ?? (c.ciDeploy ? "/healthcheck/" : "/");
+    // Health path: a warning when it sits under a path that needs a login on a public site (the watch
+    // would only see the login).
+    const healthPath = site.healthPath;
     const hp = normPath(healthPath);
-    const under = (p: string) => hp === normPath(p) || hp.startsWith(normPath(p) + "/");
-    if (tag === WEB_PUBLIC_TAG && isBase && (site?.protected_paths ?? DEFAULT_PROTECTED_PATHS).some(under)) {
-      out.warn(`${c.name}: health_path ${healthPath} is under a protected path; a monitor only sees the staff login (302) or the 404 rule on extra hostnames`, c.name);
+    const loginOver = site.access.filter((a) => a.norm !== "" && a.needsLogin && pathUnder(hp, a.norm));
+    const openOver = site.access.filter((a) => !a.needsLogin && pathUnder(hp, a.norm));
+    const mostSpecific = (xs: DesiredAccess[]) => Math.max(-1, ...xs.map((a) => a.norm.length));
+    if (site.rootOpen && isBase && loginOver.length && mostSpecific(loginOver) > mostSpecific(openOver)) {
+      out.warn(`${c.name}: health_path ${healthPath} is under a path that needs a login; a monitor only sees the staff login (302) or the 404 rule on extra hostnames`, c.name);
     }
 
     sites.push({
@@ -1417,8 +1432,8 @@ export function planWeb(
       zone,
       zoneId,
       tunnelId: c.tunnelId,
-      tag,
-      ingress: webIngress(site?.origin, c.privateIp, notFoundPaths),
+      rootOpen: site.rootOpen,
+      ingress: webIngress(site.origin, c.privateIp, notFoundPaths),
       apps,
       ...(dns ? { dns } : {}),
       hasHostApp: (ownedByDest.get(h) ?? []).some((a) => webAppKind(a.name) === "site"),
@@ -1441,9 +1456,7 @@ export function planWeb(
   const ownedDnsNames = new Set([...recsByName].filter(([n, l]) => !routeHosts.has(n) && l.some((x) => isOwnedWebDns(x.record))).map(([n]) => n));
   for (const h of new Set([...ownedAppHosts, ...ownedDnsNames, ...ownedRoutes.keys()])) {
     if (wanted.has(h) || blockedHosts.has(h) || !held.has(h)) continue;
-    const tags = tagsByName.get(ownerOf(h)) ?? tagsByName.get(h) ?? [];
-    const webTags = [WEB_STAFF_TAG, WEB_PUBLIC_TAG].filter((t) => tags.includes(t));
-    if (webTags.length === 1) continue; // has a site but not manageable right now: the reason is already reported
+    if (hasSite(ownerOf(h)) || hasSite(h)) continue; // has a site but not manageable right now: the reason is already reported
     out.warn(
       ownedDnsNames.has(h)
         ? `${h}: no web section but still on the tunnel; to roll back re-add its A record in place of the "${DNS_COMMENT_MARKER}" CNAME, then remove its tunnel route and "infra-sync: web..." Access apps by hand (or add the web section back)`
@@ -1564,7 +1577,7 @@ function planRoutes(
     }
   }
   const siteHostnames = new Set<string>();
-  for (const d of drops) if (d.site) for (const h of [d.name, ...d.site.hostnames]) siteHostnames.add(lc(h));
+  for (const d of drops) if (d.site) for (const h of d.site.hostnames) siteHostnames.add(lc(h));
 
   const ownedApps = snap.apps.filter(isOwnedRouteApp);
   const ownedByHost = new Map<string, AccessApp[]>();

@@ -144,11 +144,10 @@ describe("ownership and conflicts", () => {
     expect(f.writes().some((c) => c.body?.hostname === "a.b.example.com" || c.body?.hostname === "a-b.example.com")).toBe(false);
   });
 
-  it("warns when a deploy target has no env (no service-token policy)", async () => {
+  it("a ci-deploy droplet with no env gets no CI token (the Worker added no service-token policy either)", async () => {
     const f = exampleFixture();
     f.droplets.push(droplet(10, "deploy.example.com", "nyc1", "10.0.0.50", ["ci-deploy"]));
-    const r = await run(f);
-    expect(r.warnings.join("\n")).toMatch(/deploy\.example\.com: deploy: true but no env; no CI service-token policy added/);
+    await run(f);
     expect(f.apps.find((a) => a.domain === "ssh-deploy.example.com")?.policies?.map((p) => p.decision)).toEqual(["allow"]);
   });
 
@@ -331,7 +330,7 @@ describe("updates", () => {
     const app = f.apps.find((a) => a.domain === "ssh-click.example.com")!;
     const polId = app.policies![0]!.id;
     const before = f.calls.length;
-    await run(f, { account: { ...testAccount(), ssh_groups: { admins: ["admin@example.com"] } } });
+    await run(f, { account: { ...testAccount(), groups: { admins: ["admin@example.com"] } } });
     const puts = f.calls.slice(before).filter((c) => c.method === "PUT" && c.path.includes("/access/apps/"));
     // The 2 ssh- apps. The infrastructure app belongs to the access set: a new set's app is
     // created and the old set's deleted (test/cloudflare/ssh-access.test.ts).
@@ -441,22 +440,28 @@ describe("vpc-<label>.<zone> records", () => {
   });
 });
 
-describe("public /healthcheck for deploy targets", () => {
+describe('public /healthcheck (web.access "/healthcheck/": [everyone])', () => {
   const health = (f: FakeCloudflare, name: string) => f.apps.find((a) => a.name === `infra-sync: healthcheck ${name}`);
-
-  it("gives a deploy target a Bypass app on <name>/healthcheck, and nothing to others", async () => {
+  /** The fixture with staging.esim given a site: its ci-deploy tag then writes "/healthcheck/": [everyone]. */
+  const withSite = () => {
     const f = exampleFixture();
+    f.droplets = f.droplets.map((d) => (d.name === "staging.esim.example.com" ? { ...d, tags: [...d.tags, "web-staff"] } : d));
+    return f;
+  };
+
+  it("gives the droplet a Bypass app on <name>/healthcheck, and nothing to others", async () => {
+    const f = withSite();
     const r = await run(f);
     expect(r.errors).toEqual([]);
-    const app = health(f, "staging.esim.example.com")!; // deploy: true in the fixture
+    const app = health(f, "staging.esim.example.com")!;
     expect(app).toMatchObject({ type: "self_hosted", domain: "staging.esim.example.com/healthcheck", app_launcher_visible: false });
     expect(app.policies?.map((p) => [p.decision, p.include])).toEqual([["bypass", [{ everyone: {} }]]]);
-    expect(health(f, "click.example.com")).toBeUndefined(); // not a deploy target
+    expect(health(f, "click.example.com")).toBeUndefined(); // no /healthcheck/ in its web.access
     expect(r.result.applied.some((o) => o.key === "staging.esim.example.com/healthcheck" && o.action === "create")).toBe(true);
   });
 
   it("is not mistaken for an ssh- app: a second run makes no writes", async () => {
-    const f = exampleFixture();
+    const f = withSite();
     await run(f);
     const before = f.calls.length;
     await run(f);
@@ -464,7 +469,7 @@ describe("public /healthcheck for deploy targets", () => {
   });
 
   it("leaves a manual app that already covers the path alone, with a warning", async () => {
-    const f = exampleFixture();
+    const f = withSite();
     f.apps.push({ id: "manual-hc", name: "esim public paths", type: "self_hosted", domain: "staging.esim.example.com/healthcheck/" });
     const r = await run(f);
     expect(health(f, "staging.esim.example.com")).toBeUndefined();
@@ -472,18 +477,33 @@ describe("public /healthcheck for deploy targets", () => {
     expect(f.apps.some((a) => a.id === "manual-hc")).toBe(true);
   });
 
-  it("removes the bypass when deploy is turned off, and keeps the ssh- app", async () => {
-    const f = exampleFixture();
+  it("removes the bypass when web.access no longer opens /healthcheck/, and keeps the ssh- app", async () => {
+    const f = withSite();
     await run(f);
-    f.droplets = f.droplets.map((d) => (d.name === "staging.esim.example.com" ? { ...d, tags: ["env-staging"] } : d));
+    f.droplets = f.droplets.map((d) => (d.name === "staging.esim.example.com" ? { ...d, tags: ["env-staging", "web-staff"] } : d));
     const r = await run(f);
     expect(health(f, "staging.esim.example.com")).toBeUndefined();
     expect(appliedDeletes(r).map((o) => o.key)).toContain("staging.esim.example.com/healthcheck");
     expect(f.apps.some((a) => a.domain === "ssh-staging-esim.example.com")).toBe(true);
   });
 
-  it("deletes all six objects of a gone deploy target (within the one-droplet floor)", async () => {
-    const f = exampleFixture();
+  it("a droplet with no web section keeps the bypass it has (the Worker's, for a deploy target without a site) and gets none created", async () => {
+    const f = withSite();
+    await run(f);
+    const id = health(f, "staging.esim.example.com")!.id;
+    // No web section any more (the Worker's deploy target without a web tag): the bypass is held.
+    f.droplets = f.droplets.map((d) => (d.name === "staging.esim.example.com" ? { ...d, tags: ["env-staging", "ci-deploy"] } : d));
+    const r = await run(f);
+    expect(r.plan.ops.filter((o) => o.key === "staging.esim.example.com/healthcheck")).toEqual([]);
+    expect(health(f, "staging.esim.example.com")?.id).toBe(id);
+    // A new droplet without a web section gets none.
+    f.droplets.push(droplet(11, "jobs.example.com", "nyc1", "10.0.0.51", ["env-prod", "ci-deploy"]));
+    await run(f);
+    expect(health(f, "jobs.example.com")).toBeUndefined();
+  });
+
+  it("deletes all six objects of a gone droplet (within the one-droplet floor)", async () => {
+    const f = withSite();
     await run(f);
     f.droplets = f.droplets.filter((d) => d.name !== "staging.esim.example.com");
     const r = await run(f);

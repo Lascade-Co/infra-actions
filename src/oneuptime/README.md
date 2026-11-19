@@ -13,7 +13,7 @@ OneUptime handles ongoing health (decision 3). The tool creates each site's moni
   - **What it checks:** the URL is `https://<hostname><path>`. It is healthy on 2xx/3xx. With `acceptApp404: true`, an app 404 with a non-empty body is healthy too, but the tunnel's empty 404 still fails (see the Worker's `src/health.ts` `classifyResponse`).
   - **Alerts:** through `account.oneuptime.on_call_policy_ids`.
   - **Ops:** create, or update when an owned monitor differs. An owned monitor that no file wants any more becomes a `report` op, deleted by hand (build plan: create and update only).
-  - **Staff sites:** a `web.exposure: staff` site answers 302 to the login unless the path is bypassed. Deploy targets have a `/healthcheck` bypass. Otherwise add a warning diagnostic, as the Worker's `healthWeak` flag does.
+  - **Paths behind a login:** the monitor's path is judged by its `web.access` rule (`accessFor`: the most specific path, segment by segment). A rule that needs a login answers 302, a token or IP rule refuses the monitor, and on an extra hostname of a site open to everyone at `"/"` a login path is the tunnel's 404: each gets a warning diagnostic, as the Worker's `healthWeak` flag does. `"/healthcheck/": [everyone]` counts only on the droplet's own name.
 - **`applyMonitors(ctx, ops)`:** create and update through the API, never delete.
 
 ## Inputs and outputs

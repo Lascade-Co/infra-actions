@@ -8,7 +8,10 @@
 // (ports parsed, CIDRs normalised). Defaults that depend on other fields (origin,
 // protected paths, health path) are applied later, in core/desired.ts.
 
-/** Exactly one per managed droplet; written to DigitalOcean as the Environment tag `env-<name>`. */
+/**
+ * prod, staging or internal. Picks the region a droplet the tool creates goes to, and the old firewall
+ * tag it is created with (decision 20). Optional otherwise; never written as a tag.
+ */
 export type EnvName = "prod" | "staging" | "internal";
 export const ENV_NAMES: readonly EnvName[] = ["prod", "staging", "internal"];
 
@@ -36,10 +39,8 @@ export interface AccountConfig {
     tunnels: Record<string, string>;
     /** UUID of the reusable Access policy "staff" (web apps, staff tunnel routes). */
     staff_policy_id: string;
-    /** Every Access service token the files may name, by name -> token UUID. */
+    /** Every Access service token the files may name (`token:<name>` in a who-list), by name -> token UUID. */
     service_tokens: Record<string, string>;
-    /** Service-token names (keys of service_tokens) allowed to SSH into Deploy targets, per environment. */
-    ci_deploy_tokens: Record<EnvName, string[]>;
     /** Delete guard rails (the Worker's MAX_DELETES / MAX_DELETE_FRACTION). */
     guards: { max_deletes: number; max_delete_fraction: number };
   };
@@ -65,10 +66,13 @@ export interface AccountConfig {
   telegram?: {
     chat_id: string;
   };
-  /** The only email domain allowed in droplet ssh lists and in ssh_groups (lowercase, e.g. example.com). */
-  ssh_email_domain: string;
-  /** SSH groups a droplet's ssh list may name: name -> emails (lowercase, in file order). {} when the file has none. */
-  ssh_groups: Record<string, string[]>;
+  /** The only email domain allowed in who-lists and in groups (lowercase, e.g. example.com). */
+  email_domain: string;
+  /**
+   * Groups a who-list (`ssh:`, `web.access`) may name: name -> emails (lowercase, in file order).
+   * {} when the file has none. Never named `staff` or `everyone` (src/checks).
+   */
+  groups: Record<string, string[]>;
   ssh_config: {
     /** First comment line of the generated file, e.g. "Example Co droplets". Keeps org names out of this repo. */
     title: string;
@@ -98,33 +102,39 @@ export interface Profile extends ProfileFile {
 
 // ---------- droplets/<name>.yaml ----------
 
-export type WebExposure = "staff" | "public";
-
 /**
- * Who an exception path is open to:
- *  - "everyone": Bypass for everyone (the Worker's "everyone");
- *  - { ips }: Bypass for these addresses (normalised CIDRs, sorted, deduplicated);
- *  - { service_tokens }: Service Auth for these named tokens (keys of account service_tokens);
- *  - both lists may be given; then either may pass.
+ * One entry of a Who-list, parsed (core/values.ts parseWhoEntry):
+ *  - group:    a key of account.yaml groups;
+ *  - email:    an address in account.yaml email_domain (lowercase);
+ *  - staff:    anyone with a staff login (the reusable "staff" Access policy);
+ *  - everyone: no login at all (web only);
+ *  - token:    a named Access service token (a key of account.cloudflare.service_tokens);
+ *  - ip:       a fixed address range, normalised CIDR (web only).
  */
-export type ExceptionAllow = "everyone" | { ips?: string[]; service_tokens?: string[] };
+export type WhoEntry =
+  | { kind: "group"; name: string }
+  | { kind: "email"; email: string }
+  | { kind: "staff" }
+  | { kind: "everyone" }
+  | { kind: "token"; name: string }
+  | { kind: "ip"; cidr: string };
 
-export interface WebException {
+/** One web.access rule: a path and who may reach everything under it. */
+export interface AccessRule {
+  /** As written ("/" or e.g. "/admin"); Access app names embed it. */
   path: string;
-  allow: ExceptionAllow;
+  /** The who-list as written (at least one entry). */
+  who: string[];
 }
 
 export interface WebSpec {
-  /** web-staff (staff only) or web-public (everyone; protected paths need the staff login). */
-  exposure: WebExposure;
   /** e.g. "http://{ip}:80". Default (applied in desired): https://{ip}:443 with noTLSVerify. */
   origin?: string;
   /** Extra one-level hostnames the droplet serves, besides its own name. */
   hostnames: string[];
-  /** web-public only. Default ["/admin"]. */
-  protected_paths?: string[];
-  exceptions: WebException[];
-  /** Default "/healthcheck/" when deploy is true, else "/". */
+  /** web.access in file order; "/" is always one of them (the loader requires it). */
+  access: AccessRule[];
+  /** Default "/healthcheck/" when web.access opens /healthcheck/ to everyone, else "/". */
   health_path?: string;
   health_accept_app_404: boolean;
 }
@@ -185,8 +195,6 @@ export interface DropletFile {
   /** Droplet profile. Set only for droplets the tool creates; adopted existing droplets have none. */
   profile?: string;
   env?: EnvName;
-  /** Deploy target (the `ci-deploy` tag). */
-  deploy: boolean;
   /**
    * The plan shows this droplet's changes, but apply skips them (e.g. a droplet that needs an
    * owner's go-ahead), except its SSH access: the ssh-access tag on its existing Cloudflare target
@@ -194,8 +202,9 @@ export interface DropletFile {
    */
   frozen: boolean;
   /**
-   * SSH access list: group names (keys of account ssh_groups) and/or emails, as written (at least
-   * one). Who may SSH into this droplet, always as ubuntu.
+   * SSH access list, a Who-list as written (at least one entry): groups, emails, `staff` and
+   * `token:<name>` (a machine caller such as CI: it may reach sshd through the droplet's ssh- route,
+   * and still logs in with its own key). Who may SSH into this droplet, always as ubuntu.
    */
   ssh: string[];
   web?: WebSpec;
@@ -205,7 +214,7 @@ export interface DropletFile {
   swarm?: SwarmSpec;
 }
 
-/** Where a value came from, for messages. `path` is a dotted path such as web.exceptions[0].path. */
+/** Where a value came from, for messages. `path` is a dotted path such as web.access["/admin"][0]. */
 export interface SourceRef {
   file: string; // relative to the infra checkout, e.g. droplets/app.example.com.yaml
   path?: string;

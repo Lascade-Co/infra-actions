@@ -10,7 +10,7 @@
     "digitalocean",
     "github",
     "ssh_config",
-    "ssh_email_domain"
+    "email_domain"
   ],
   "properties": {
     "cloudflare": {
@@ -22,8 +22,7 @@
         "zones",
         "tunnels",
         "staff_policy_id",
-        "service_tokens",
-        "ci_deploy_tokens"
+        "service_tokens"
       ],
       "properties": {
         "account_id": {
@@ -60,7 +59,7 @@
           "$ref": "#/definitions/uuid"
         },
         "service_tokens": {
-          "description": "Every Access service token the droplet files may name: name -> token UUID.",
+          "description": "Every Access service token the droplet files may name (token:<name> in a who-list, e.g. token:ci-prod in ssh:): name -> token UUID.",
           "type": "object",
           "propertyNames": {
             "type": "string",
@@ -68,27 +67,6 @@
           },
           "additionalProperties": {
             "$ref": "#/definitions/uuid"
-          }
-        },
-        "ci_deploy_tokens": {
-          "description": "Service-token names allowed to SSH into Deploy targets, per environment.",
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "prod",
-            "staging",
-            "internal"
-          ],
-          "properties": {
-            "prod": {
-              "$ref": "#/definitions/tokenNames"
-            },
-            "staging": {
-              "$ref": "#/definitions/tokenNames"
-            },
-            "internal": {
-              "$ref": "#/definitions/tokenNames"
-            }
           }
         },
         "guards": {
@@ -220,22 +198,29 @@
         }
       }
     },
-    "ssh_email_domain": {
-      "description": "The only email domain allowed in droplet ssh lists and in ssh_groups, e.g. example.com.",
+    "email_domain": {
+      "description": "The only email domain allowed in who-lists (ssh:, web.access) and in groups, e.g. example.com.",
       "$ref": "#/definitions/domain"
     },
-    "ssh_groups": {
-      "description": "SSH groups a droplet ssh list may name: group name -> the emails in it (each in ssh_email_domain). Who may SSH, always as ubuntu.",
+    "groups": {
+      "description": "Groups a who-list (ssh:, web.access) may name: group name -> the emails in it (each in email_domain). Not named staff or everyone (built-in who-list names).",
       "type": "object",
       "propertyNames": {
         "type": "string",
-        "pattern": "^[a-z][a-z0-9-]*$"
+        "pattern": "^[a-z][a-z0-9-]*$",
+        "not": {
+          "enum": [
+            "staff",
+            "everyone"
+          ]
+        },
+        "x-error": "a group name is lowercase letters, digits and dashes, starting with a letter, and not staff or everyone"
       },
       "additionalProperties": {
         "type": "array",
         "minItems": 1,
         "uniqueItems": true,
-        "x-error": "an SSH group must list at least one email",
+        "x-error": "a group must list at least one email",
         "items": {
           "$ref": "#/definitions/email"
         }
@@ -257,14 +242,6 @@
       "type": "string",
       "pattern": "^[a-z]{3}[0-9]$",
       "description": "A DigitalOcean region slug such as nyc1."
-    },
-    "tokenNames": {
-      "type": "array",
-      "uniqueItems": true,
-      "items": {
-        "type": "string",
-        "pattern": "^[a-z0-9][a-z0-9_-]*$"
-      }
     },
     "email": {
       "type": "string",

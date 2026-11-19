@@ -37,9 +37,11 @@ describe("loader: the example checkout", () => {
   it("parses and normalises values", async () => {
     const c = loadInfraFiles(await exampleFiles()).config!;
     const shop = c.droplets.find((d) => d.file.name === "shop.example.com")!.file;
-    expect(shop.deploy).toBe(true);
     expect(shop.frozen).toBe(false);
-    expect(shop.web!.exceptions[1]!.allow).toEqual({ ips: ["198.51.100.0/24", "203.0.113.9/32"], service_tokens: ["uptime"] });
+    expect(shop.ssh).toEqual(["admins", "shop-team", "token:ci-prod"]);
+    // web.access in file order, who-lists as written (desired.ts parses them).
+    expect(shop.web!.access.map((r) => r.path)).toEqual(["/", "/admin", "/internal", "/webhooks/payments", "/api/partner", "/healthcheck/"]);
+    expect(shop.web!.access[4]).toEqual({ path: "/api/partner", who: ["ip:198.51.100.0/24", "ip:203.0.113.9", "token:uptime"] });
     expect(shop.allow.droplet[0]!.ports[0]).toMatchObject({ from: 8080, to: 8080, protocol: "tcp" });
 
     const db = c.droplets.find((d) => d.file.name === "db.example.com")!.file;
@@ -71,8 +73,8 @@ describe("loader: droplet files", () => {
   });
 
   it("names unknown keys with their path and line", async () => {
-    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nweb:\n  exposure: staff\n  colour: blue\nssh: [admins]\n" });
-    expect(only(res.diagnostics)).toMatchObject({ code: "schema", path: "web.colour", line: 4, message: 'unknown key "colour"' });
+    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nweb:\n  access:\n    /: [staff]\n  colour: blue\nssh: [admins]\n" });
+    expect(only(res.diagnostics)).toMatchObject({ code: "schema", path: "web.colour", line: 5, message: 'unknown key "colour"' });
   });
 
   it("explains enum errors with the allowed values", async () => {
@@ -86,18 +88,29 @@ describe("loader: droplet files", () => {
     expect(errs.some((d) => d.path === "name" && d.message.includes("lowercase domain"))).toBe(true);
   });
 
-  it("requires env with a profile and with deploy", async () => {
-    let res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nprofile: ubuntu-4\n" });
+  it("requires env with a profile", async () => {
+    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nprofile: ubuntu-4\n" });
     expect(only(res.diagnostics).message).toContain("env is required when a profile is set");
-    res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\ndeploy: true\n" });
-    expect(only(res.diagnostics).message).toContain("env is required for a deploy target");
+  });
+
+  it("rejects the removed deploy key (CI is a token:<name> in ssh)", async () => {
+    const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nenv: prod\ndeploy: true\n" });
+    expect(only(res.diagnostics)).toMatchObject({ code: "schema", path: "deploy", line: 4, message: 'unknown key "deploy"' });
+  });
+
+  it("accepts staff and token:<name> in ssh, and reports an entry that doesn't parse", async () => {
+    let res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [staff, token:ci-prod, admins, someone@example.com]\n" });
+    expect(res.diagnostics).toEqual([]);
+    expect(res.config!.droplets.find((d) => d.file.name === "x.example.com")!.file.ssh).toEqual(["staff", "token:ci-prod", "admins", "someone@example.com"]);
+    res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins, ip:999.1.1.1]\n" });
+    expect(only(res.diagnostics)).toMatchObject({ code: "invalid", path: "ssh[1]", line: 2, message: expect.stringContaining("IP address or CIDR") });
   });
 
   it("accepts a minimal adopted droplet", async () => {
     const res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\n" });
     expect(res.diagnostics).toEqual([]);
     const x = res.config!.droplets.find((d) => d.file.name === "x.example.com")!.file;
-    expect(x).toEqual({ name: "x.example.com", deploy: false, frozen: false, ssh: ["admins"], allow: { droplet: [], tunnel: [], ip: [] } });
+    expect(x).toEqual({ name: "x.example.com", frozen: false, ssh: ["admins"], allow: { droplet: [], tunnel: [], ip: [] } });
   });
 
   it("rejects ports without protocol and reversed ranges", async () => {
@@ -131,48 +144,74 @@ describe("loader: droplet files", () => {
   describe("web", () => {
     const web = (body: string) => ({ [D("x.example.com")]: `name: x.example.com\nssh: [admins]\nweb:\n${body}` });
 
-    it("rejects protected_paths on a staff site", async () => {
-      const res = await loadWith(web("  exposure: staff\n  protected_paths: [/admin]\n"));
-      expect(only(res.diagnostics)).toMatchObject({ path: "web", message: expect.stringContaining("only for exposure: public") });
+    const ACCESS = "  access:\n    /: [staff]\n";
+
+    it("loads web.access in file order, who-lists as written", async () => {
+      const res = await loadWith(web("  access:\n    /: [everyone]\n    /Admin: [staff, admins]\n    /hook: [ip:192.0.2.1, token:uptime]\n"));
+      expect(res.diagnostics).toEqual([]);
+      const x = res.config!.droplets.find((d) => d.file.name === "x.example.com")!.file;
+      expect(x.web).toEqual({
+        hostnames: [],
+        access: [
+          { path: "/", who: ["everyone"] },
+          { path: "/Admin", who: ["staff", "admins"] },
+          { path: "/hook", who: ["ip:192.0.2.1", "token:uptime"] },
+        ],
+        health_accept_app_404: false,
+      });
     });
 
-    it("rejects an exception that is also a protected path (default /admin included)", async () => {
-      const res = await loadWith(web("  exposure: public\n  exceptions:\n    - path: /admin/\n      allow: everyone\n"));
-      expect(only(res.diagnostics)).toMatchObject({ path: "web.exceptions[0].path", message: expect.stringContaining("both a protected path and an exception") });
+    it('requires "/" in web.access', async () => {
+      const res = await loadWith(web("  access:\n    /admin: [staff]\n"));
+      expect(only(res.diagnostics)).toMatchObject({ code: "web-access-root", file: D("x.example.com"), path: "web.access", line: 5 });
+      expect(only(res.diagnostics).message).toContain('web.access needs "/"');
     });
 
-    it("rejects duplicate exception paths after normalising", async () => {
-      const res = await loadWith(web("  exposure: staff\n  exceptions:\n    - path: /hook\n      allow: everyone\n    - path: /Hook/\n      allow: everyone\n"));
-      expect(only(res.diagnostics)).toMatchObject({ path: "web.exceptions[1].path", message: expect.stringContaining("duplicate") });
+    it("rejects the same path twice once lowercased and stripped of a trailing slash", async () => {
+      const res = await loadWith(web("  access:\n    /: [staff]\n    /Admin: [staff]\n    /admin/: [admins]\n"));
+      expect(only(res.diagnostics)).toMatchObject({ code: "web-access-duplicate", path: 'web.access["/admin/"]', line: 7 });
+      expect(only(res.diagnostics).message).toContain('"/admin/" is the same path as "/Admin"');
     });
 
-    it("explains a wrong exception allow", async () => {
-      const res = await loadWith(web("  exposure: staff\n  exceptions:\n    - path: /hook\n      allow: anyone\n"));
-      expect(only(res.diagnostics)).toMatchObject({ path: "web.exceptions[0].allow", message: expect.stringContaining('"everyone" or an object') });
+    it.each([
+      ["/admin/*", "wildcards"],
+      ["/caf%C3%A9", "percent-encoded"],
+      ["/a//b", "empty segment"],
+    ])("rejects %s in a web.access path (%s)", async (path, why) => {
+      const res = await loadWith(web(`  access:\n    /: [staff]\n    ${path}: [staff]\n`));
+      expect(only(res.diagnostics)).toMatchObject({ code: "web-access-path", path: `web.access[${JSON.stringify(path)}]` });
+      expect(only(res.diagnostics).message).toContain(why);
     });
 
-    it("rejects an empty allow object and an unknown allow key", async () => {
-      let res = await loadWith(web("  exposure: staff\n  exceptions:\n    - path: /hook\n      allow: {}\n"));
-      expect(only(res.diagnostics).path).toBe("web.exceptions[0].allow");
-      res = await loadWith(web("  exposure: staff\n  exceptions:\n    - path: /hook\n      allow: {emails: [a@example.com]}\n"));
-      expect(only(res.diagnostics).path).toBe("web.exceptions[0].allow");
+    it("rejects a who-list entry that doesn't parse, at its place in web.access", async () => {
+      const res = await loadWith(web("  access:\n    /: [staff]\n    /hook: [token:uptime, ip:999.1.1.1]\n"));
+      expect(only(res.diagnostics)).toMatchObject({ code: "invalid", path: 'web.access["/hook"][1]', line: 6, message: expect.stringContaining("IP address or CIDR") });
+    });
+
+    it("rejects the removed keys exposure, protected_paths and exceptions", async () => {
+      const res = await loadWith(web(`${ACCESS}  exposure: staff\n  protected_paths: [/admin]\n  exceptions: []\n`));
+      expect(res.diagnostics.filter((d) => d.level === "error").map((d) => [d.code, d.path])).toEqual([
+        ["schema", "web.exposure"],
+        ["schema", "web.protected_paths"],
+        ["schema", "web.exceptions"],
+      ]);
     });
 
     it("rejects generated prefixes and the droplet's own name as extra hostnames", async () => {
-      const res = await loadWith(web("  exposure: staff\n  hostnames: [ssh-x.example.com, x.example.com]\n"));
+      const res = await loadWith(web(`${ACCESS}  hostnames: [ssh-x.example.com, x.example.com]\n`));
       const errs = res.diagnostics.filter((d) => d.level === "error").map((d) => d.path);
       expect(errs).toEqual(["web.hostnames[0]", "web.hostnames[1]"]);
     });
 
     it("rejects an origin with a path and a health path that isn't a path", async () => {
-      let res = await loadWith(web("  exposure: staff\n  origin: http://{ip}:80/app\n"));
+      let res = await loadWith(web(`${ACCESS}  origin: http://{ip}:80/app\n`));
       expect(only(res.diagnostics).path).toBe("web.origin");
-      res = await loadWith(web("  exposure: staff\n  health_path: healthcheck\n"));
+      res = await loadWith(web(`${ACCESS}  health_path: healthcheck\n`));
       expect(only(res.diagnostics)).toMatchObject({ path: "web.health_path", message: expect.stringContaining("health_path must be") });
     });
 
     it("rejects monitors for hostnames the droplet doesn't serve, and monitors without web", async () => {
-      let res = await loadWith(web("  exposure: staff\nmonitors:\n  - hostname: other.example.com\n"));
+      let res = await loadWith(web(`${ACCESS}monitors:\n  - hostname: other.example.com\n`));
       expect(only(res.diagnostics).path).toBe("monitors[0].hostname");
       res = await loadWith({ [D("x.example.com")]: "name: x.example.com\nssh: [admins]\nmonitors:\n  - hostname: x.example.com\n" });
       expect(only(res.diagnostics).message).toContain("need a web section");
@@ -237,15 +276,38 @@ describe("loader: profiles", () => {
 });
 
 describe("loader: account.yaml", () => {
-  it("requires CI deploy token names to exist and every env region to have a tunnel", async () => {
+  it("requires every env region to have a tunnel", async () => {
     const files = await exampleFiles();
-    const acc = files["account.yaml"]!.replace("prod: [ci-prod]", "prod: [ci-nope]").replace("staging: blr1", "staging: sfo3");
+    const acc = files["account.yaml"]!.replace("staging: blr1", "staging: sfo3");
     const res = loadInfraFiles({ ...files, "account.yaml": acc });
-    const errs = res.diagnostics.filter((d) => d.level === "error");
-    expect(errs.map((d) => [d.code, d.path])).toEqual([
-      ["unknown-service-token", "cloudflare.ci_deploy_tokens.prod[0]"],
-      ["region-without-tunnel", "digitalocean.regions.staging"],
-    ]);
+    expect(only(res.diagnostics)).toMatchObject({ code: "region-without-tunnel", path: "digitalocean.regions.staging" });
+  });
+  it("lowercases group emails, keeping file order", async () => {
+    const files = await exampleFiles();
+    const acc = files["account.yaml"]!.replace(
+      "  shop-team:\n    - dev@example.com",
+      "  shop-team:\n    - Zed@example.com\n    - dev@example.com",
+    );
+    const c = loadInfraFiles({ ...files, "account.yaml": acc }).config!;
+    expect(c.account.email_domain).toBe("example.com");
+    expect(c.account.groups).toEqual({ admins: ["admin@example.com", "ops@example.com"], "shop-team": ["zed@example.com", "dev@example.com"] });
+  });
+  it("rejects the old key names and a group named staff or everyone", async () => {
+    const files = await exampleFiles();
+    let res = loadInfraFiles({ ...files, "account.yaml": files["account.yaml"]!.replace("email_domain:", "ssh_email_domain:").replace("groups:", "ssh_groups:") });
+    expect(res.diagnostics.map((d) => [d.code, d.path])).toEqual(
+      expect.arrayContaining([
+        ["schema", "ssh_email_domain"],
+        ["schema", "ssh_groups"],
+      ]),
+    );
+    for (const name of ["staff", "everyone"]) {
+      res = loadInfraFiles({ ...files, "account.yaml": files["account.yaml"]!.replace("  shop-team:", `  ${name}:`) });
+      expect(res.config, name).toBeUndefined();
+      expect(res.diagnostics, name).toContainEqual(
+        expect.objectContaining({ code: "schema", file: "account.yaml", path: "groups", message: expect.stringContaining("not staff or everyone") }),
+      );
+    }
   });
   it("rejects malformed ids", async () => {
     const files = await exampleFiles();

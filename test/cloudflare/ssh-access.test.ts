@@ -11,7 +11,7 @@ import { ADMINS, changes, droplet, FakeCloudflare, opKeys, planOnly, run, testAc
 const DEV = "dev@example.com";
 
 function account(groups: Record<string, string[]> = { admins: [...ADMINS], devs: [DEV] }): AccountConfig {
-  return { ...testAccount(), ssh_groups: groups };
+  return { ...testAccount(), groups };
 }
 
 /** Three droplets: a and b for the admins, c for the admins and a developer (two access sets). */
@@ -263,9 +263,11 @@ describe("migration from the Worker's single app", () => {
     const f = await workerState();
     f.frozen.add("b.example.com");
     f.ssh["b.example.com"] = ["devs"];
-    // Other changes for b: a new private IP (target, ssh- route, vpc- record) and deploy (CI tokens on its ssh- app, a healthcheck app).
+    // Other changes for b: a new private IP (target, ssh- route, vpc- record) and a CI token in its
+    // ssh list (Service Auth on its ssh- app; no site, so no healthcheck app).
     f.droplets = f.droplets.map((d) => (d.name === "b.example.com" ? { ...d, privateIp: "10.0.0.33", tags: [...d.tags, "ci-deploy"] } : d));
-    const acct = { ...account(), cloudflare: { ...account().cloudflare, ci_deploy_tokens: { ...account().cloudflare.ci_deploy_tokens, prod: ["ci-staging"] } } };
+    f.ciTokens = { prod: ["ci-staging"] };
+    const acct = account();
     const appBefore = structuredClone(f.apps.find((a) => a.domain === "ssh-b.example.com")!);
     const tunnelsBefore = structuredClone(f.tunnels);
     const vpcBefore = structuredClone(Object.values(f.dns).flat().find((x) => x.name === "vpc-b.example.com"));
@@ -296,7 +298,6 @@ describe("migration from the Worker's single app", () => {
         "report infra-target b.example.com (beyond SSH access)",
         "report access-app ssh-b.example.com (beyond SSH access)",
         "report dns-record A vpc-b.example.com",
-        "report access-app b.example.com/healthcheck",
       ]),
     );
     expect(r.plan.ops.filter((o) => o.droplet === "b.example.com" && o.action !== "report").map((o) => `${o.kind} ${o.key}`).sort()).toEqual(
@@ -455,8 +456,8 @@ describe("retiring a droplet with its own access set", () => {
     const r = await run(f, { account: account() });
     expect(r.warnings.join("\n")).not.toMatch(/refusing to delete/);
     expect(gaps).toEqual([]);
-    // ssh- DNS, route, ssh- app, target, vpc- DNS, healthcheck app, and the set's app: 7 deletes.
-    expect(r.plan.ops.filter((o) => o.action === "delete")).toHaveLength(7);
+    // ssh- DNS, route, ssh- app, target, vpc- DNS, and the set's app: 6 deletes (no site, so no healthcheck app).
+    expect(r.plan.ops.filter((o) => o.action === "delete")).toHaveLength(6);
     expect(infraApps(f).map((a) => a.name)).toEqual([`infra-sync: SSH ${target(f, "b.example.com").tags!["ssh-access"]}`]);
     expect(infraApps(f).some((a) => a.name === `infra-sync: SSH ${aSet}`)).toBe(false);
     expect(changes(await planOnly(f, account()))).toEqual([]);

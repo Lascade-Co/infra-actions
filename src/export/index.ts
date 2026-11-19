@@ -15,15 +15,20 @@
 // domain under an account zone and its region has a tunnel. Droplets with no tags at all are
 // left out unless asked (they need an owner's decision first) and listed in the notes.
 //
-// What each file holds, so the tool's plan matches what the Worker does today:
-//   - env from the one env-* tag; deploy from ci-deploy; web.exposure from web-staff or
-//     web-public, plus the site's web-config.json entry (only the keys it sets: defaults stay
-//     defaults);
-//   - ssh: [admins], the group of today's SSH_ADMIN_EMAILS (same people, ubuntu only);
+// What each file holds, so the tool's plan matches what the Worker does today (convert.ts):
+//   - env from the one env-* tag;
+//   - ssh: [admins], the group of today's SSH_ADMIN_EMAILS (same people, ubuntu only), plus
+//     token:<the env's CI token> for a ci-deploy droplet;
+//   - web.access from web-staff ("/": [staff]) or web-public ("/": [everyone] plus each protected
+//     path as [staff]), the exceptions as their who-lists, "/healthcheck/": [everyone] for a
+//     ci-deploy droplet with a site; the rest of the site's web-config.json entry (only the keys
+//     it sets: defaults stay defaults);
 //   - frozen: true for the droplets named as frozen;
 //   - the drafts, under a DRAFT comment, minus any entry the schema or the checks reject.
-// Anything that can't be expressed without changing a tag (a web-config.json entry on a
-// droplet with no web tag, both web tags, ci-deploy without env) is left out and noted.
+// The tool writes no tags (decision 20), so the tags stay as they are. Anything the Worker
+// doesn't build (a web-config.json entry on a droplet with no web tag, both web tags) is left
+// out and noted. A ci-deploy droplet with no site keeps its healthcheck bypass as it is (the
+// planner holds it: only a web section can ask for one).
 //
 // Pure: buildExport takes parsed inputs and returns file texts plus notes. src/export/run.ts
 // does the reading and writing.
@@ -31,6 +36,7 @@
 import { stringify } from "yaml";
 import { checkConfig, checkDesired } from "../checks/index.js";
 import { CI_DEPLOY_TAG, ENV_TAGS, WEB_PUBLIC_TAG, WEB_STAFF_TAG } from "../core/constants.js";
+import { convertLegacy, type LegacySite } from "./convert.js";
 import { buildDesired } from "../core/desired.js";
 import type { Diagnostic } from "../core/diagnostics.js";
 import { ACCOUNT_FILE, loadInfraFiles, type InfraFiles } from "../core/loader.js";
@@ -120,6 +126,8 @@ interface AccountBuild {
   account: Record<string, unknown>;
   zones: string[];
   tunnels: Record<string, string>;
+  /** The CI service-token names per environment (CI_SERVICE_TOKEN_IDS, named). */
+  ciTokens: Record<EnvName, string[]>;
 }
 
 function buildAccount(input: ExportInput, warnings: string[]): AccountBuild {
@@ -156,9 +164,11 @@ function buildAccount(input: ExportInput, warnings: string[]): AccountBuild {
 
   const admins = adminEmails(vars);
   const domains = [...new Set(admins.map((e) => e.split("@")[1]!))];
-  const emailDomain = typeof base.ssh_email_domain === "string" ? base.ssh_email_domain : domains[0]!;
+  // An account base in the format before decision 19 (ssh_email_domain, ssh_groups) still works.
+  const emailDomain =
+    typeof base.email_domain === "string" ? base.email_domain : typeof base.ssh_email_domain === "string" ? base.ssh_email_domain : domains[0]!;
   if (domains.some((d) => d !== emailDomain)) warnings.push(`SSH_ADMIN_EMAILS has addresses outside ${emailDomain}; the checks will reject them`);
-  const baseGroups = isObj(base.ssh_groups) ? (base.ssh_groups as Record<string, string[]>) : {};
+  const baseGroups = isObj(base.groups) ? (base.groups as Record<string, string[]>) : isObj(base.ssh_groups) ? (base.ssh_groups as Record<string, string[]>) : {};
 
   const account: Record<string, unknown> = {
     cloudflare: {
@@ -168,7 +178,6 @@ function buildAccount(input: ExportInput, warnings: string[]): AccountBuild {
       tunnels,
       staff_policy_id: strVar(vars, "STAFF_POLICY_ID").toLowerCase(),
       service_tokens: Object.fromEntries(Object.entries(tokens).sort(([a], [b]) => a.localeCompare(b))),
-      ci_deploy_tokens: ciDeploy,
       ...(Object.keys(guards).length ? { guards } : {}),
     },
     ...(isObj(base.digitalocean) ? { digitalocean: base.digitalocean } : {}),
@@ -176,25 +185,18 @@ function buildAccount(input: ExportInput, warnings: string[]): AccountBuild {
     ...(isObj(base.github) ? { github: base.github } : {}),
     ...(vars.TELEGRAM_CHAT_ID?.trim() ? { telegram: { chat_id: vars.TELEGRAM_CHAT_ID.trim() } } : isObj(base.telegram) ? { telegram: base.telegram } : {}),
     ...(isObj(base.ssh_config) ? { ssh_config: base.ssh_config } : {}),
-    ssh_email_domain: emailDomain,
-    ssh_groups: { ...baseGroups, [ADMINS_GROUP]: admins },
+    email_domain: emailDomain,
+    groups: { ...baseGroups, [ADMINS_GROUP]: admins },
   };
   for (const k of ["digitalocean", "github", "ssh_config"]) {
     if (!(k in account)) throw new ExportError(`the account base has no ${k} section (the Worker doesn't hold it)`);
   }
-  return { account, zones, tunnels };
+  return { account, zones, tunnels, ciTokens: ciDeploy };
 }
 
 // ---------- droplet files ----------
 
-interface WebSite {
-  origin?: string;
-  hostnames?: string[];
-  protected_paths?: string[];
-  exceptions?: unknown[];
-  health_path?: string;
-  health_accept_app_404?: boolean;
-}
+type WebSite = LegacySite;
 
 interface Drafts {
   allow?: Record<string, unknown[]>;
@@ -275,7 +277,7 @@ function dropDraft(p: Planned, d: Diagnostic): string | undefined {
 
 export function buildExport(input: ExportInput): ExportResult {
   const notes: ExportNotes = { written: [], leftOut: [], notManaged: [], webNotWritten: [], draftsDropped: [], warnings: [] };
-  const { account, zones, tunnels } = buildAccount(input, notes.warnings);
+  const { account, zones, tunnels, ciTokens } = buildAccount(input, notes.warnings);
 
   const sites = isObj(input.webConfig) && isObj(input.webConfig.sites) ? (input.webConfig.sites as Record<string, WebSite>) : {};
   if (!isObj(input.webConfig) || !isObj(input.webConfig.sites)) notes.warnings.push("web-config.json has no sites object");
@@ -303,40 +305,31 @@ export function buildExport(input: ExportInput): ExportResult {
       notes.leftOut.push({ name, reason: "no tags at all: left out until its owner decides (the Worker still manages it by name)" });
       continue;
     }
-    const spec: Record<string, unknown> = { name };
     const envs = ENV_NAMES.filter((e) => d.tags.includes(ENV_TAGS[e]));
-    if (envs.length === 1) spec.env = envs[0];
-    else if (envs.length > 1) notes.warnings.push(`${name}: several environment tags (${envs.join(", ")}); env left out, so the apply would remove them`);
-    if (d.tags.includes(CI_DEPLOY_TAG)) {
-      if (spec.env) spec.deploy = true;
-      else notes.warnings.push(`${name}: tagged ${CI_DEPLOY_TAG} without one environment tag; deploy left out (the schema needs env), so the apply would remove ${CI_DEPLOY_TAG}`);
-    }
-    if (frozen.has(name)) spec.frozen = true;
-    spec.ssh = [ADMINS_GROUP];
-
+    if (envs.length > 1) notes.warnings.push(`${name}: several environment tags (${envs.join(", ")}); env left out (it only picks the region of a droplet the tool creates)`);
     const staff = d.tags.includes(WEB_STAFF_TAG);
     const pub = d.tags.includes(WEB_PUBLIC_TAG);
     const site = sites[name];
     if (staff && pub) {
-      notes.warnings.push(`${name}: tagged both ${WEB_STAFF_TAG} and ${WEB_PUBLIC_TAG}; web left out, so the apply would remove both tags`);
+      notes.warnings.push(`${name}: tagged both ${WEB_STAFF_TAG} and ${WEB_PUBLIC_TAG}; the Worker builds no site for it, so web is left out`);
       if (site) notes.webNotWritten.push({ name, reason: "both web tags" });
-    } else if (staff || pub) {
-      const web: Record<string, unknown> = { exposure: staff ? "staff" : "public" };
-      if (site) {
-        if (site.origin !== undefined) web.origin = site.origin;
-        if (site.hostnames?.length) web.hostnames = [...site.hostnames];
-        if (site.protected_paths?.length) {
-          if (pub) web.protected_paths = [...site.protected_paths];
-          else notes.webNotWritten.push({ name, reason: "protected_paths on a web-staff site (the Worker ignores them too)" });
-        }
-        if (site.exceptions?.length) web.exceptions = site.exceptions.map((e) => (isObj(e) ? { ...e } : e));
-        if (site.health_path !== undefined) web.health_path = site.health_path;
-        if (site.health_accept_app_404 !== undefined) web.health_accept_app_404 = site.health_accept_app_404;
-      }
-      spec.web = web;
-    } else if (site) {
-      notes.webNotWritten.push({ name, reason: `web-config.json has an entry but the droplet has no web tag; the Worker builds no site for it, and a web: block would add a ${WEB_STAFF_TAG}/${WEB_PUBLIC_TAG} tag` });
+    } else if (!staff && !pub && site) {
+      notes.webNotWritten.push({ name, reason: "web-config.json has an entry but the droplet has no web tag; the Worker builds no site for it" });
     }
+    const { spec, notes: convNotes } = convertLegacy(
+      {
+        name,
+        ...(envs.length === 1 ? { env: envs[0]! } : {}),
+        ciDeploy: d.tags.includes(CI_DEPLOY_TAG),
+        ...(staff !== pub ? { exposure: staff ? ("staff" as const) : ("public" as const) } : {}),
+        ...(site ? { site } : {}),
+        frozen: frozen.has(name),
+        people: [ADMINS_GROUP],
+      },
+      ciTokens,
+    );
+    for (const n of convNotes) notes.warnings.push(`${name}: ${n}`);
+
     const dr = drafts.get(name) ?? {};
     drafts.delete(name);
     planned.push({ name, spec, drafts: { ...(dr.allow ? { allow: { ...dr.allow } } : {}), ...(dr.swarm ? { swarm: dr.swarm } : {}) } });

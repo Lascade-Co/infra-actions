@@ -1,18 +1,17 @@
 # An internal tool on the second zone: staff site, a health path that answers the app's own
-# 404, an API path for a monitor's service token, and an explicit monitor list.
+# 404, an API path for a monitor's service token, a page for one team, and an explicit monitor list.
 name: tools.example.net
 env: internal
 ssh:
   - admins
   - tools-owner@example.com   # a single person, without a group
 web:
-  exposure: staff
   health_path: /status
   health_accept_app_404: true
-  exceptions:
-    - path: /api
-      allow:
-        service_tokens: [uptime]
+  access:
+    /: [staff]
+    /api: [token:uptime]
+    /reports: [shop-team, tools-owner@example.com]
 monitors:
   - hostname: tools.example.net
     path: /api/health

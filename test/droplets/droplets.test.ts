@@ -48,7 +48,7 @@ async function exampleConfig(changes?: Record<string, string | null>): Promise<I
 
 const obs = (id: number, name: string, over: Partial<ObservedDroplet> = {}): ObservedDroplet => toObservedDroplet(doDroplet(id, name, over as never));
 
-/** The example's existing droplets (shop, db, tools, worker), tagged as their files want. */
+/** The example's existing droplets (shop, db, tools, worker), with the Worker's tags (the tool never changes them). */
 function existing(): ObservedDroplet[] {
   return [
     obs(101, "shop.example.com", { tags: ["ci-deploy", "env-prod", "web-public"] }),
@@ -152,18 +152,19 @@ describe("droplets: plan", () => {
           region: "blr1",
           size: "s-1vcpu-1gb",
           image: "ubuntu-26-04-x64",
-          tags: ["ci-deploy", "env-staging", "web-staff"],
+          tags: ["staging"],
           monitoring: true,
           ipv6: false,
           backups: false,
           profile: "ubuntu-6",
         },
-        reason: "new droplet from profile ubuntu-6 (s-1vcpu-1gb, ubuntu-26-04-x64) in blr1, the region of env staging",
+        reason: "new droplet from profile ubuntu-6 (s-1vcpu-1gb, ubuntu-26-04-x64) in blr1, the region of env staging, tagged staging for today's firewalls",
         droplet: "staging-shop.example.com",
       },
       expect.objectContaining({
         key: "worker-2.example.com",
-        after: expect.objectContaining({ region: "nyc1", size: "s-1vcpu-512mb-10gb", tags: ["env-prod"] }),
+        after: expect.objectContaining({ region: "nyc1", size: "s-1vcpu-512mb-10gb", tags: ["production"] }),
+        reason: expect.stringContaining(", tagged production for today's firewalls"),
       }),
     ]);
     const text = JSON.stringify(plan);
@@ -186,53 +187,39 @@ describe("droplets: plan", () => {
     expect(() => createRequest(desired.droplets.find((x) => x.name === "shop.example.com")!)).toThrow(/status "create"/);
   });
 
-  it("updates only managed tags; other tags are never in the op", async () => {
-    const droplets = existing();
-    droplets[0]!.tags = ["production", "env-prod", "ci-deploy", "web-staff", "team-x"]; // wants web-public
-    droplets[3]!.tags = ["env-prod", "env-staging", "swarm"]; // a second env tag
-    droplets[1]!.tags = ["production"]; // db: missing env-prod
-    const plan = planDroplets(await desiredFor(droplets), { droplets });
-    const tagOps = plan.ops.filter((o) => o.kind === "droplet-tags");
-    expect(tagOps).toEqual([
-      expect.objectContaining({
-        key: "db.example.com",
-        action: "update",
-        before: { tags: [] },
-        after: { tags: ["env-prod"] },
-        reason: "managed tags written from the droplet file: add env-prod",
-        ids: { droplet_id: "102" },
-      }),
-      {
-        provider: "digitalocean",
-        module: "droplets",
-        kind: "droplet-tags",
-        key: "shop.example.com",
-        action: "update",
-        before: { tags: ["ci-deploy", "env-prod", "web-staff"] },
-        after: { tags: ["ci-deploy", "env-prod", "web-public"] },
-        reason: "managed tags written from the droplet file: add web-public, remove web-staff",
-        droplet: "shop.example.com",
-        ids: { droplet_id: "101" },
-      },
-      expect.objectContaining({ key: "worker.example.com", before: { tags: ["env-prod", "env-staging"] }, after: { tags: ["env-prod"] } }),
-    ]);
-    const text = JSON.stringify(tagOps);
-    for (const t of ["production", "team-x", "swarm"]) expect(text).not.toContain(t);
-    expect(plan.unchanged).toBe(1);
+  it.each<[string, string, string]>([
+    ["prod", "nyc1", "production"],
+    ["staging", "blr1", "staging"],
+    ["internal", "blr1", "internal"],
+  ])("creates a %s droplet with exactly one tag, its env's old firewall tag, in the request and the plan", async (env, region, tag) => {
+    const desired = await desiredFor(existing(), {
+      "droplets/new.example.com.yaml": `name: new.example.com\nprofile: ubuntu-4\nenv: ${env}\nssh: [admins]\n`,
+    });
+    const d = desired.droplets.find((x) => x.name === "new.example.com")!;
+    expect(createRequest(d).tags).toEqual([tag]);
+    const op = planDroplets(desired, { droplets: existing() }).ops.find((o) => o.key === "new.example.com")!;
+    expect(op.after).toMatchObject({ region, tags: [tag] });
+    expect(op.reason).toBe(`new droplet from profile ubuntu-4 (s-1vcpu-512mb-10gb, ubuntu-26-04-x64) in ${region}, the region of env ${env}, tagged ${tag} for today's firewalls`);
   });
 
-  it("removes ci-deploy and web tags the file no longer asks for", async () => {
+  it("plans no tag op for existing droplets whose tags differ from what the Worker would have set (decision 20)", async () => {
     const droplets = existing();
-    droplets[1]!.tags = ["env-prod", "ci-deploy", "web-public"];
+    droplets[0]!.tags = ["production", "env-prod", "web-staff", "team-x"]; // no ci-deploy / web-public tags
+    droplets[1]!.tags = ["env-prod", "ci-deploy", "web-public"]; // db: tags its file no longer asks for
+    droplets[2]!.tags = []; // tools: no firewall tag either
+    droplets[3]!.tags = ["env-prod", "env-staging", "swarm"]; // a second env tag
     const plan = planDroplets(await desiredFor(droplets), { droplets });
-    expect(plan.ops.find((o) => o.key === "db.example.com")).toMatchObject({ before: { tags: ["ci-deploy", "env-prod", "web-public"] }, after: { tags: ["env-prod"] } });
+    expect(plan.ops.map((o) => `${o.kind} ${o.action} ${o.key}`)).toEqual(["droplet create staging-shop.example.com", "droplet create worker-2.example.com"]);
+    expect(plan.ops.filter((o) => o.kind === "droplet-tags")).toEqual([]);
+    expect(plan.unchanged).toBe(4);
+    expect(plan.diagnostics).toEqual([]);
   });
 
   it("never resizes, rebuilds or deletes: a droplet that drifted from its profile gets an info diagnostic only", async () => {
     const droplets = [...existing(), obs(105, "worker-2.example.com", { region: { slug: "blr1" }, size_slug: "s-2vcpu-2gb", image: { slug: "ubuntu-24-04-x64" }, tags: ["env-prod"] } as never)];
     const plan = planDroplets(await desiredFor(droplets), { droplets });
     expect(plan.ops.filter((o) => o.key === "worker-2.example.com")).toEqual([]);
-    expect(plan.ops.every((o) => o.action === "create" || o.action === "update")).toBe(true);
+    expect(plan.ops.every((o) => o.kind === "droplet" && o.action === "create")).toBe(true);
     expect(plan.diagnostics).toEqual([
       {
         level: "info",
@@ -316,13 +303,14 @@ describe("droplets: apply", () => {
     ]);
     const writes = f.writes();
     expect(writes.map((c) => `${c.method} ${c.path}`)).toEqual(["POST /droplets", "POST /droplets"]);
+    expect(writes[1]!.body).toMatchObject({ name: "worker-2.example.com", region: "nyc1", tags: ["production"] });
     expect(writes[0]!.body).toEqual({
       name: "staging-shop.example.com",
       region: "blr1",
       size: "s-1vcpu-1gb",
       image: "ubuntu-26-04-x64",
       user_data: (await exampleConfig()).profiles["ubuntu-6"]!.userDataText,
-      tags: ["ci-deploy", "env-staging", "web-staff"],
+      tags: ["staging"],
       monitoring: true,
       ipv6: false,
       backups: false,
@@ -353,21 +341,29 @@ describe("droplets: apply", () => {
       fail: (c) => (c.method === "POST" && c.path === "/droplets" && ++posts === 2 ? { status: 500, body: { id: "server_error", message: "Server was unable to give you a response." } } : undefined),
     });
     const { provider, observed, plan } = await planned(f);
-    const ops = [...plan.ops, tagOp("db.example.com", "102", ["env-prod"], ["ci-deploy", "env-prod"])];
-    const res = await provider.apply(ops, observed);
+    const res = await provider.apply(plan.ops, observed);
     expect(f.writes().map((c) => `${c.method} ${c.path}`)).toEqual(["POST /droplets", "POST /droplets"]);
     expect(res.applied.map((o) => [o.key, o.ids?.droplet_id])).toEqual([["staging-shop.example.com", "9000"]]);
     expect(res.failed).toEqual([
       { op: expect.objectContaining({ key: "worker-2.example.com" }), error: "create failed (not retried): digitalocean POST /droplets: HTTP 500 (Server was unable to give you a response.)" },
     ]);
-    expect(res.skipped.map((s) => s.op.key)).toEqual(["db.example.com"]);
+    expect(res.skipped).toEqual([]);
+  });
+
+  it("skips the creates after a failed one", async () => {
+    const f = fakeDo({ droplets: existingDo(), fail: (c) => (c.method === "POST" && c.path === "/droplets" ? { status: 422, body: { id: "unprocessable_entity", message: "invalid size" } } : undefined) });
+    const { provider, observed, plan } = await planned(f);
+    const res = await provider.apply(plan.ops, observed);
+    expect(f.writes()).toHaveLength(1);
+    expect(res.applied).toEqual([]);
+    expect(res.failed.map((x) => x.op.key)).toEqual(["staging-shop.example.com"]);
+    expect(res.skipped).toEqual([{ op: expect.objectContaining({ key: "worker-2.example.com" }), reason: "not applied: an earlier droplets op failed" }]);
   });
 
   it("times out after the bounded wait and reports the droplet as failed", async () => {
     const f = fakeDo({ droplets: existingDo(), pollsUntilActive: 1000 });
     const { ctx, provider, observed, plan } = await planned(f);
-    const creates = plan.ops.filter((o) => o.kind === "droplet");
-    const res = await provider.apply([...creates, tagOp("db.example.com", "102", ["env-prod"], ["ci-deploy", "env-prod"])], observed);
+    const res = await provider.apply(plan.ops, observed);
     expect(ctx.sleeps).toHaveLength(60);
     expect(ctx.sleeps.reduce((a, b) => a + b, 0)).toBe(300_000);
     expect(res.applied).toEqual([]);
@@ -375,8 +371,8 @@ describe("droplets: apply", () => {
       "created as id 9000 but not active with public and private IPv4 after 300s (status new, private IPv4 no, public IPv4 no)",
       "created as id 9001 but not active with public and private IPv4 after 300s (status new, private IPv4 no, public IPv4 no)",
     ]);
-    expect(res.skipped.map((s) => s.op.key)).toEqual(["db.example.com"]);
-    expect(f.writes().filter((c) => c.path.startsWith("/tags"))).toEqual([]);
+    expect(res.skipped).toEqual([]);
+    expect(f.writes().map((c) => `${c.method} ${c.path}`)).toEqual(["POST /droplets", "POST /droplets"]);
   });
 
   it("keeps polling through a failed read while the wait lasts", async () => {
@@ -388,65 +384,45 @@ describe("droplets: apply", () => {
     expect(res.applied.map((o) => o.key)).toEqual(["staging-shop.example.com"]);
   });
 
-  it("adds missing managed tags (creating the tag if needed) before removing others, through the tags API", async () => {
-    const f = fakeDo({ droplets: existingDo(), tags: ["env-prod", "env-staging", "env-internal", "web-staff", "web-public", "ci-deploy", "production"] });
-    f.droplets[0]!.tags = ["env-prod", "ci-deploy", "web-staff", "production"];
-    f.droplets[1]!.tags = ["env-prod", "env-staging"];
-    const { provider, observed, plan } = await planned(f);
-    const res = await provider.apply(plan.ops.filter((o) => o.kind === "droplet-tags"), observed);
-    expect(res.failed).toEqual([]);
-    expect(res.applied.map((o) => o.key)).toEqual(["db.example.com", "shop.example.com"]);
-    expect(f.writes().map((c) => [c.method, c.path, c.body])).toEqual([
-      ["DELETE", "/tags/env-staging/resources", { resources: [{ resource_id: "102", resource_type: "droplet" }] }],
-      ["POST", "/tags/web-public/resources", { resources: [{ resource_id: "101", resource_type: "droplet" }] }],
-      ["DELETE", "/tags/web-staff/resources", { resources: [{ resource_id: "101", resource_type: "droplet" }] }],
-    ]);
-    expect(f.droplets[0]!.tags).toEqual(["env-prod", "ci-deploy", "production", "web-public"]);
+  it("refuses a droplet-tags op before sending anything: the tool never writes DigitalOcean tags", async () => {
+    const f = fakeDo({ droplets: existingDo() });
+    const op = tagOp("db.example.com", "102", ["env-prod"], ["ci-deploy", "env-prod"]);
+    const res = await applyDroplets(context(f.fetch), [op]);
+    expect(res).toEqual({
+      module: "droplets",
+      applied: [],
+      failed: [{ op, error: "refused: the tool never writes DigitalOcean tags (decision 20)" }],
+      skipped: [],
+    });
+    expect(f.calls).toEqual([]);
     expect(f.droplets[1]!.tags).toEqual(["env-prod"]);
   });
 
-  it("creates a tag that does not exist yet, then tags the droplet", async () => {
-    const f = fakeDo({ droplets: existingDo(), tags: ["env-prod"] });
-    const res = await applyDroplets(context(f.fetch), [tagOp("db.example.com", "102", ["env-prod"], ["ci-deploy", "env-prod"])]);
-    expect(res.applied).toHaveLength(1);
-    expect(f.writes().map((c) => [c.method, c.path, c.body])).toEqual([
-      ["POST", "/tags", { name: "ci-deploy" }],
-      ["POST", "/tags/ci-deploy/resources", { resources: [{ resource_id: "102", resource_type: "droplet" }] }],
-    ]);
-  });
-
-  it("never touches a tag outside the managed list, even if an op names one", async () => {
+  it("a refused droplet-tags op blocks the creates of the same apply", async () => {
     const f = fakeDo({ droplets: existingDo() });
-    const res = await applyDroplets(context(f.fetch), [tagOp("worker.example.com", "104", ["env-prod", "production"], ["env-prod", "team-x"])]);
-    expect(res.applied).toHaveLength(1);
-    expect(f.writes()).toEqual([]);
-    expect(f.droplets[3]!.tags).toEqual(["env-prod", "production"]);
-  });
-
-  it("stops at the first failed tag change and says what was already done", async () => {
-    const f = fakeDo({
-      droplets: existingDo(),
-      tags: ["env-prod", "ci-deploy", "web-public", "web-staff"],
-      fail: (c) => (c.method === "DELETE" ? { status: 403, body: { id: "forbidden", message: "You do not have access for the attempted action." } } : undefined),
-    });
-    const ops = [tagOp("db.example.com", "102", ["env-prod", "web-staff"], ["ci-deploy", "env-prod"]), tagOp("shop.example.com", "101", [], ["env-prod"])];
-    const res = await applyDroplets(context(f.fetch), ops);
-    expect(res.failed).toEqual([
-      {
-        op: ops[0],
-        error: "digitalocean DELETE /tags/web-staff/resources: HTTP 403 (You do not have access for the attempted action.) (already done: added ci-deploy)",
-      },
+    const { provider, observed, plan } = await planned(f);
+    const op = tagOp("worker.example.com", "104", ["env-prod", "production"], ["env-prod"]);
+    const res = await provider.apply([...plan.ops, op], observed);
+    expect(f.calls).toEqual([]);
+    expect(res.applied).toEqual([]);
+    expect(res.failed).toEqual([{ op, error: "refused: the tool never writes DigitalOcean tags (decision 20)" }]);
+    expect(res.skipped.map((x) => [x.op.key, x.reason])).toEqual([
+      ["staging-shop.example.com", "not applied: another droplets op was refused"],
+      ["worker-2.example.com", "not applied: another droplets op was refused"],
     ]);
-    expect(res.skipped).toEqual([{ op: ops[1], reason: "not applied: an earlier droplets op failed" }]);
+    expect(f.droplets[3]!.tags).toEqual(["env-prod", "production"]);
   });
 
   it("refuses deletes, resizes and ops of other modules before sending anything", async () => {
     const f = fakeDo({ droplets: existingDo() });
+    const { plan } = await planned(f);
+    const desired = await desiredFor(f.droplets.map(toObservedDroplet));
+    const ok = plan.ops[0]!;
+    const requests = new Map([[ok.key, createRequest(desired.droplets.find((d) => d.name === ok.key)!)]]);
     const del: PlanOp = { provider: "digitalocean", module: "droplets", kind: "droplet", key: "db.example.com", action: "delete", before: {}, after: null, reason: "x" };
     const resize: PlanOp = { ...del, action: "update", after: { size: "s-2vcpu-2gb" } };
     const foreign: PlanOp = { ...tagOp("db.example.com", "102", [], ["env-prod"]), module: "firewall" };
-    const ok = tagOp("db.example.com", "102", ["env-prod"], ["ci-deploy", "env-prod"]);
-    const res = await applyDroplets(context(f.fetch), [ok, del, resize, foreign]);
+    const res = await applyDroplets(context(f.fetch), [ok, del, resize, foreign], { requests });
     expect(f.calls).toEqual([]);
     expect(res.failed.map((x) => x.error)).toEqual([
       "refused: create-only, the tool never does delete on droplet",

@@ -47,7 +47,7 @@ describe("checkConfig", () => {
 
   it("allows a multi-level droplet name without a site, but not as a site hostname", async () => {
     expect(checkConfig(await config({ "droplets/staging.app.example.com.yaml": "name: staging.app.example.com\nssh: [admins]\n" }))).toEqual([]);
-    const ds = checkConfig(await config({ "droplets/staging.app.example.com.yaml": "name: staging.app.example.com\nssh: [admins]\nweb:\n  exposure: staff\n" }));
+    const ds = checkConfig(await config({ "droplets/staging.app.example.com.yaml": "name: staging.app.example.com\nssh: [admins]\nweb:\n  access:\n    /: [staff]\n" }));
     expect(pick(ds)).toEqual([{ level: "error", code: "not-one-level", file: f("staging.app.example.com"), path: "name", droplet: "staging.app.example.com" }]);
     expect(ds[0]!.message).toContain("Use staging-app.example.com");
   });
@@ -59,8 +59,9 @@ describe("checkConfig", () => {
           "name: app.example.com",
           "ssh: [admins]",
           "web:",
-          "  exposure: staff",
           "  hostnames: [x.y.example.net, app.example.org]",
+          "  access:",
+          '    "/": [staff]',
           "allow:",
           "  tunnel:",
           "    - route: pg.app.example.com",
@@ -83,8 +84,9 @@ describe("checkConfig", () => {
           "name: app.example.com",
           "ssh: [admins]",
           "web:",
-          "  exposure: public",
           "  hostnames: [shop.example.net, tools.example.net]",
+          "  access:",
+          '    "/": [everyone]',
           "allow:",
           "  tunnel:",
           "    - route: db-etl.example.com",
@@ -116,11 +118,9 @@ describe("checkConfig", () => {
           "profile: ubuntu-99",
           "env: prod",
           "web:",
-          "  exposure: public",
-          "  exceptions:",
-          "    - path: /api",
-          "      allow:",
-          "        service_tokens: [nope]",
+          "  access:",
+          '    "/": [everyone]',
+          "    /api: [token:nope]",
           "allow:",
           "  droplet:",
           "    - from: ghost.example.com",
@@ -136,20 +136,14 @@ describe("checkConfig", () => {
       { level: "error", code: "unknown-profile", file: f("app.example.com"), path: "profile", droplet: "app.example.com" },
       { level: "error", code: "unknown-droplet", file: f("app.example.com"), path: "allow.droplet[0].from", droplet: "app.example.com" },
       { level: "error", code: "unknown-service-token", file: f("app.example.com"), path: "allow.tunnel[0].who[1]", droplet: "app.example.com" },
-      { level: "error", code: "unknown-service-token", file: f("app.example.com"), path: "web.exceptions[0].allow.service_tokens", droplet: "app.example.com" },
+      { level: "error", code: "unknown-service-token", file: f("app.example.com"), path: 'web.access["/api"][0]', droplet: "app.example.com" },
     ]);
     expect(ds[0]!.message).toContain("available: ubuntu-4, ubuntu-6");
     expect(ds[1]!.message).toContain("ghost.example.com has no droplet file (droplets/ghost.example.com.yaml)");
     expect(ds[2]!.message).toContain('service token "missing" is not in account.yaml cloudflare.service_tokens');
+    expect(ds[3]!.message).toBe('service token "nope" is not in account.yaml cloudflare.service_tokens (known: ci-internal, ci-prod, ci-staging, etl, uptime)');
   });
 
-  it("warns when a deploy target's environment has no CI token", async () => {
-    const files = await exampleWith({});
-    files["account.yaml"] = files["account.yaml"]!.replace("staging: [ci-staging]", "staging: []");
-    const c = loadInfraFiles(files).config!;
-    const ds = checkConfig(c);
-    expect(pick(ds)).toEqual([{ level: "warning", code: "no-deploy-token", file: f("staging-shop.example.com"), path: "deploy", droplet: "staging-shop.example.com" }]);
-  });
 
   it("accepts /udp only with who: [staff], and says why", async () => {
     const tunnel = (who: string) =>
@@ -295,45 +289,61 @@ describe("checkChange", () => {
 
 describe("SSH access (decision 18)", () => {
   const ACCOUNT = "account.yaml";
-  /** The example account.yaml with its ssh_groups replaced. */
+  /** The example account.yaml with its groups replaced. */
   const withGroups = async (groups: string): Promise<string> => {
     const text = (await exampleWith({}))[ACCOUNT]!;
-    const i = text.indexOf("ssh_groups:");
+    const i = text.indexOf("\ngroups:");
     expect(i).toBeGreaterThan(0);
-    return `${text.slice(0, i)}ssh_groups:\n${groups}`;
+    return `${text.slice(0, i)}\ngroups:\n${groups}`;
   };
   const shop = (ssh: string) => `name: app.example.com\nssh: ${ssh}\n`;
 
-  it("passes groups and emails in the account's domain", async () => {
+  it("passes groups and emails in the account's domain, staff and known tokens", async () => {
     expect(checkConfig(await config({ "droplets/app.example.com.yaml": shop("[admins, shop-team, someone@example.com]") }))).toEqual([]);
+    expect(checkConfig(await config({ "droplets/app.example.com.yaml": shop("[staff, token:etl, token:ci-prod]") }))).toEqual([]);
+  });
+
+  it("rejects an unknown service token, with the known ones", async () => {
+    const ds = checkConfig(await config({ "droplets/app.example.com.yaml": shop("[admins, token:ci-nope]") }));
+    expect(pick(ds)).toEqual([{ level: "error", code: "unknown-service-token", file: f("app.example.com"), path: "ssh[1]", droplet: "app.example.com" }]);
+    expect(ds[0]!.message).toContain("known: ci-internal, ci-prod, ci-staging, etl, uptime");
+  });
+
+  it("rejects everyone and ip: in ssh (web only)", async () => {
+    let ds = checkConfig(await config({ "droplets/app.example.com.yaml": shop("[everyone]") }));
+    expect(pick(ds)).toEqual([{ level: "error", code: "ssh-web-only", file: f("app.example.com"), path: "ssh[0]", droplet: "app.example.com" }]);
+    expect(ds[0]!.message).toContain("everyone is web only");
+    ds = checkConfig(await config({ "droplets/app.example.com.yaml": shop("[admins, ip:192.0.2.0/24]") }));
+    expect(pick(ds)).toEqual([{ level: "error", code: "ssh-web-only", file: f("app.example.com"), path: "ssh[1]", droplet: "app.example.com" }]);
+    expect(ds[0]!.message).toContain("ip:192.0.2.0/24: an IP range is web only");
   });
 
   it("rejects an unknown group, with the file, field and the known groups", async () => {
     const ds = checkConfig(await config({ "droplets/app.example.com.yaml": shop("[admins, devops]") }));
-    expect(pick(ds)).toEqual([{ level: "error", code: "unknown-ssh-group", file: f("app.example.com"), path: "ssh[1]", droplet: "app.example.com" }]);
-    expect(ds[0]!.message).toBe('SSH group "devops" is not in account.yaml ssh_groups (known: admins, shop-team)');
+    expect(pick(ds)).toEqual([{ level: "error", code: "unknown-group", file: f("app.example.com"), path: "ssh[1]", droplet: "app.example.com" }]);
+    expect(ds[0]!.message).toBe('group "devops" is not in account.yaml groups (known: admins, shop-team)');
   });
 
   it("treats a group name that is also an object property (constructor) as unknown, without crashing", async () => {
     const c = await config({ "droplets/app.example.com.yaml": shop("[admins, constructor]") });
-    expect(codes(checkConfig(c))).toEqual(["unknown-ssh-group"]);
+    expect(codes(checkConfig(c))).toEqual(["unknown-group"]);
     expect(buildDesired(c, []).droplets.find((x) => x.name === "app.example.com")!.sshEmails).toEqual(["admin@example.com", "ops@example.com"]);
   });
 
-  it("rejects an email outside ssh_email_domain in a droplet file (the exact domain, not a suffix)", async () => {
+  it("rejects an email outside email_domain in a droplet file (the exact domain, not a suffix)", async () => {
     const ds = checkConfig(
       await config({ "droplets/app.example.com.yaml": shop("[someone@example.net, someone@sub.example.com, x@example.com.example.net, ok@example.com]") }),
     );
     expect(pick(ds)).toEqual(
-      ["ssh[0]", "ssh[1]", "ssh[2]"].map((path) => ({ level: "error", code: "ssh-email-domain", file: f("app.example.com"), path, droplet: "app.example.com" })),
+      ["ssh[0]", "ssh[1]", "ssh[2]"].map((path) => ({ level: "error", code: "email-domain", file: f("app.example.com"), path, droplet: "app.example.com" })),
     );
-    expect(ds[0]!.message).toBe("someone@example.net is not an @example.com address: only example.com addresses (account.yaml ssh_email_domain) may SSH into droplets");
+    expect(ds[0]!.message).toBe("someone@example.net is not an @example.com address: only example.com addresses (account.yaml email_domain) may be listed");
   });
 
-  it("rejects an email outside ssh_email_domain in an SSH group, at its place in account.yaml", async () => {
+  it("rejects an email outside email_domain in a group, at its place in account.yaml", async () => {
     const ds = checkConfig(await config({ [ACCOUNT]: await withGroups("  admins: [admin@example.com]\n  shop-team: [dev@example.com, contractor@example.org]\n") }));
     expect(ds.map(({ level, code, file, path }) => ({ level, code, file, path }))).toEqual([
-      { level: "error", code: "ssh-email-domain", file: ACCOUNT, path: "ssh_groups.shop-team[1]" },
+      { level: "error", code: "email-domain", file: ACCOUNT, path: "groups.shop-team[1]" },
     ]);
     expect(ds[0]!.message).toContain("contractor@example.org is not an @example.com address");
   });
@@ -342,7 +352,7 @@ describe("SSH access (decision 18)", () => {
     const r = loadInfraFiles(await exampleWith({ [ACCOUNT]: await withGroups("  admins: [admin@example.com]\n  shop-team: []\n") }));
     expect(r.config).toBeUndefined();
     expect(r.diagnostics.map(({ code, file, path, message }) => ({ code, file, path, message }))).toEqual([
-      { code: "schema", file: ACCOUNT, path: "ssh_groups.shop-team", message: "an SSH group must list at least one email" },
+      { code: "schema", file: ACCOUNT, path: "groups.shop-team", message: "a group must list at least one email" },
     ]);
     const bad = loadInfraFiles(await exampleWith({ [ACCOUNT]: await withGroups("  admins: [admin@example.com]\n  shop-team: [dev@example.com]\n  Ops: [ops@example.com]\n") }));
     expect(bad.diagnostics.map((d) => [d.code, d.file])).toContainEqual(["schema", ACCOUNT]);
@@ -362,7 +372,7 @@ describe("SSH access (decision 18)", () => {
         file: f("app.example.com"),
         path: "ssh",
         line: 2,
-        message: "ssh must list at least one group or email: every droplet needs someone who can SSH in as ubuntu",
+        message: "ssh must list at least one entry: every droplet needs someone who can SSH in as ubuntu",
       }),
     ]);
     const odd = loadInfraFiles(await exampleWith({ "droplets/app.example.com.yaml": shop("[Admins, not an email]") }));
@@ -371,14 +381,99 @@ describe("SSH access (decision 18)", () => {
 
   it("checkConfig also rejects an empty list or group in a config built in code", async () => {
     const c = await config();
-    c.account.ssh_groups = { ...c.account.ssh_groups, empty: [] };
+    c.account.groups = { ...c.account.groups, empty: [] };
     c.droplets[0]!.file.ssh = [];
-    expect(codes(checkConfig(c)).sort()).toEqual(["ssh-group-empty", "ssh-missing"]);
+    expect(codes(checkConfig(c)).sort()).toEqual(["group-empty", "ssh-missing"]);
+  });
+
+  it("checkConfig rejects a group named staff or everyone in a config built in code (the schema rejects it in a file)", async () => {
+    const c = await config();
+    c.account.groups = { ...c.account.groups, everyone: ["a@example.com"], staff: ["b@example.com"] };
+    const ds = checkConfig(c);
+    expect(ds.map(({ level, code, file, path }) => ({ level, code, file, path }))).toEqual([
+      { level: "error", code: "group-reserved-name", file: ACCOUNT, path: "groups.everyone" },
+      { level: "error", code: "group-reserved-name", file: ACCOUNT, path: "groups.staff" },
+    ]);
+    expect(ds[1]!.message).toContain('a group can\'t be named "staff"');
   });
 
   it("resolves a droplet's list in the desired state: groups expanded, lowercase, deduplicated, sorted", async () => {
     const c = await config({ "droplets/app.example.com.yaml": shop("[shop-team, Admin@example.com, admins]") });
     const d = buildDesired(c, []).droplets.find((x) => x.name === "app.example.com")!;
     expect(d.sshEmails).toEqual(["admin@example.com", "dev@example.com", "ops@example.com"]);
+  });
+});
+
+describe("web access (decision 19)", () => {
+  const app = (ssh: string, web: string[]) => ["name: app.example.com", `ssh: ${ssh}`, ...web].join("\n") + "\n";
+  const site = (...access: string[]) => app("[admins]", ["web:", "  access:", ...access.map((a) => `    ${a}`)]);
+
+  it("checks every who-list in web.access: groups, tokens and email domains", async () => {
+    const ds = checkConfig(
+      await config({
+        "droplets/app.example.com.yaml": site('"/": [staff]', "/reports: [admins, devops]", "/api: [token:nope, ip:192.0.2.1]", "/Team/: [someone@example.net]"),
+      }),
+    );
+    expect(pick(ds)).toEqual([
+      { level: "error", code: "unknown-group", file: f("app.example.com"), path: 'web.access["/reports"][1]', droplet: "app.example.com" },
+      { level: "error", code: "unknown-service-token", file: f("app.example.com"), path: 'web.access["/api"][0]', droplet: "app.example.com" },
+      { level: "error", code: "email-domain", file: f("app.example.com"), path: 'web.access["/Team/"][0]', droplet: "app.example.com" },
+    ]);
+  });
+
+  it("allows everyone and ip: on the web", async () => {
+    expect(checkConfig(await config({ "droplets/app.example.com.yaml": site('"/": [everyone]', "/hook: [ip:192.0.2.0/24, token:uptime]") }))).toEqual([]);
+  });
+
+  it("requires everyone to stand alone", async () => {
+    const ds = checkConfig(await config({ "droplets/app.example.com.yaml": site('"/": [everyone, staff]') }));
+    expect(pick(ds)).toEqual([{ level: "error", code: "everyone-mixed", file: f("app.example.com"), path: 'web.access["/"]', droplet: "app.example.com" }]);
+    expect(ds[0]!.message).toContain("list it alone (got [everyone, staff])");
+  });
+
+  it("rejects an empty who-list in a config built in code (the schema rejects it in a file)", async () => {
+    const c = await config({ "droplets/app.example.com.yaml": site('"/": [staff]', "/admin: [admins]") });
+    c.droplets.find((d) => d.file.name === "app.example.com")!.file.web!.access[1]!.who = [];
+    expect(pick(checkConfig(c))).toEqual([
+      { level: "error", code: "who-list-empty", file: f("app.example.com"), path: 'web.access["/admin"]', droplet: "app.example.com" },
+    ]);
+  });
+
+  describe("a CI token in ssh without /healthcheck/", () => {
+    const ci = (web: string[]) => app("[admins, token:ci-prod]", web);
+
+    it("warns when the droplet has a site and web.access has no /healthcheck/", async () => {
+      const ds = checkConfig(await config({ "droplets/app.example.com.yaml": ci(["web:", "  access:", '    "/": [staff]']) }));
+      expect(pick(ds)).toEqual([{ level: "warning", code: "ci-token-no-healthcheck", file: f("app.example.com"), path: "web.access", droplet: "app.example.com" }]);
+      expect(ds[0]!.message).toContain("token:ci-prod");
+      expect(ds[0]!.message).toMatch(/Add "\/healthcheck\/?": \[everyone\]/);
+    });
+
+    it("is silent without a site, with /healthcheck/ in web.access, and for a token not named ci-*", async () => {
+      expect(checkConfig(await config({ "droplets/app.example.com.yaml": ci([]) }))).toEqual([]);
+      expect(checkConfig(await config({ "droplets/app.example.com.yaml": ci(["web:", "  access:", '    "/": [staff]', "    /healthcheck/: [everyone]"]) }))).toEqual([]);
+      // Compared as Access does: without case or a trailing slash.
+      expect(checkConfig(await config({ "droplets/app.example.com.yaml": ci(["web:", "  access:", '    "/": [staff]', "    /HealthCheck: [everyone]"]) }))).toEqual([]);
+      expect(checkConfig(await config({ "droplets/app.example.com.yaml": app("[admins, token:etl]", ["web:", "  access:", '    "/": [staff]']) }))).toEqual([]);
+    });
+  });
+
+  describe("an open path under one that answers 404 on the extra hostnames", () => {
+    const open = (hostnames: string, root: string) =>
+      app("[admins]", ["web:", ...(hostnames ? [`  hostnames: [${hostnames}]`] : []), "  access:", `    "/": [${root}]`, "    /admin: [staff]", "    /admin/hook: [everyone]", "    /admin/api: [token:uptime]", "    /blog: [everyone]"]);
+
+    it("warns on each such path of a public site with extra hostnames", async () => {
+      const ds = checkConfig(await config({ "droplets/app.example.com.yaml": open("app.example.net", "everyone") }));
+      expect(pick(ds)).toEqual([
+        { level: "warning", code: "web-access-under-404", file: f("app.example.com"), path: 'web.access["/admin/hook"]', droplet: "app.example.com" },
+        { level: "warning", code: "web-access-under-404", file: f("app.example.com"), path: 'web.access["/admin/api"]', droplet: "app.example.com" },
+      ]);
+      expect(ds[0]!.message).toContain("/admin/hook is under /admin, which needs a login and so answers 404 on the extra hostnames (app.example.net)");
+    });
+
+    it("is silent with no extra hostnames, or when the root needs a login", async () => {
+      expect(checkConfig(await config({ "droplets/app.example.com.yaml": open("", "everyone") }))).toEqual([]);
+      expect(checkConfig(await config({ "droplets/app.example.com.yaml": open("app.example.net", "staff") }))).toEqual([]);
+    });
   });
 });

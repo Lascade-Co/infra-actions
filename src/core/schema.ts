@@ -33,15 +33,19 @@ function getValidators(): Record<SchemaKind, ValidateFunction> {
 export interface SchemaIssue {
   /** Path segments into the document (keys and array indexes). */
   segments: Array<string | number>;
-  /** Dotted form, e.g. web.exceptions[0].path ("" for the top level). */
+  /** Dotted form, e.g. web.access["/admin"][0] ("" for the top level). */
   path: string;
   message: string;
 }
 
-/** web.exceptions[0].path */
+/** web.hostnames[0], web.access["/admin"][0] (a key that isn't a plain name is quoted). */
 export function dottedPath(segments: ReadonlyArray<string | number>): string {
   let out = "";
-  for (const s of segments) out += typeof s === "number" ? `[${s}]` : out ? `.${s}` : s;
+  for (const s of segments) {
+    if (typeof s === "number") out += `[${s}]`;
+    else if (!/^[A-Za-z0-9_-]+$/.test(s)) out += `[${JSON.stringify(s)}]`;
+    else out += out ? `.${s}` : s;
+  }
   return out;
 }
 

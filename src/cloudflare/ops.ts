@@ -210,7 +210,7 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
       const fa = h.frozenApp;
       if (h.app.op === "noop") unchanged++;
       else if (fa) {
-        // Frozen droplet: only the people on its ssh- app change; the rest (CI deploy tokens, ...)
+        // Frozen droplet: only the people on its ssh- app change; the rest (service tokens, ...)
         // stays report-only, as a second op.
         add({
           phase: PHASE.sshApp,
@@ -238,7 +238,7 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
               action: "update",
               before: appView(fa.existing),
               after: j(h.app.body),
-              reason: "the SSH route's Access policies changed (CI deploy tokens)",
+              reason: "the SSH route's Access policies changed (service tokens in the ssh list)",
               droplet: h.name,
               ids: { id: fa.existingId },
             },
@@ -256,7 +256,7 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
               action: opAction(h.app.op),
               before: h.app.existing ? appView(h.app.existing) : null,
               after: j(h.app.body),
-              reason: h.app.op === "create" ? "Access app for the droplet's SSH route" : "the SSH route's Access policies changed (the droplet's ssh list or CI deploy tokens)",
+              reason: h.app.op === "create" ? "Access app for the droplet's SSH route" : "the SSH route's Access policies changed (the droplet's ssh list: people or service tokens)",
               droplet: h.name,
               ids: {
                 ...(h.app.existingId ? { id: h.app.existingId } : {}),
@@ -311,10 +311,10 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
             after: j(a.body),
             reason:
               a.kind === "site"
-                ? `staff login for the whole site ${s.hostname}`
+                ? `web.access "/": who may reach the whole site ${s.hostname}`
                 : a.kind === "admin"
-                  ? `staff login for the protected path ${a.destination}`
-                  : `exception path ${a.destination}`,
+                  ? `web.access: the path ${a.destination} needs a login`
+                  : `web.access: the path ${a.destination} is open without a login (everyone, service tokens or IP ranges)`,
             droplet: s.name,
             ids: {
               ...(a.existingId ? { id: a.existingId } : {}),
@@ -586,7 +586,7 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
         action: del,
         before: appView(a),
         after: null,
-        reason: delReason(site ? "the site no longer plans this Access app (exposure, path or exception changed, or a duplicate)" : "no droplet file has this site hostname any more"),
+        reason: delReason(site ? "the site no longer plans this Access app (its web.access path or who-list changed, or a duplicate)" : "no droplet file has this site hostname any more"),
         ...(hosts[0] && ownerOfName(hosts[0]) ? { droplet: ownerOfName(hosts[0])! } : {}),
         ids: { id: a.id },
       },
@@ -688,7 +688,7 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
           action: opAction(h.op),
           before: h.existing ? appView(h.existing) : null,
           after: j(h.body),
-          reason: "public /healthcheck bypass for a deploy target",
+          reason: "web.access \"/healthcheck/\": [everyone]: the public healthcheck bypass on the droplet's own name",
           droplet: h.name,
           ...(h.existingId ? { ids: { id: h.existingId } } : {}),
         },
@@ -707,7 +707,7 @@ export function toOps(plan: Plan, snap: Snapshot, desired: DesiredState): OpsRes
         action: del,
         before: appView(a),
         after: null,
-        reason: delReason("the droplet is no longer a deploy target, or a duplicate bypass"),
+        reason: delReason("web.access no longer opens /healthcheck/ to everyone, or a duplicate bypass"),
         ...(ownerOfName(d.split("/")[0]!) ? { droplet: ownerOfName(d.split("/")[0]!)! } : {}),
         ids: { id: a.id },
       },

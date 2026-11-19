@@ -1,4 +1,6 @@
-// An in-memory fake of the DigitalOcean API v2 endpoints the droplets module uses.
+// An in-memory fake of the DigitalOcean API v2 endpoints the droplets module uses: list, get and
+// create droplets. It has no tag endpoints: the tool never writes DigitalOcean tags (decision 20),
+// so any tag request gets a 404 and still shows up in writes().
 // Fake data only: example.com names, RFC 5737 and 10.0.0.x addresses.
 
 import type { DoDroplet } from "../../src/droplets/api.js";
@@ -13,7 +15,6 @@ export interface FakeCall {
 
 export interface FakeDoOptions {
   droplets?: DoDroplet[];
-  tags?: string[];
   /** Page size the fake uses (the client asks for 200; small pages test pagination). */
   pageSize?: number;
   /** Override meta.total. */
@@ -48,7 +49,6 @@ export function doDroplet(id: number, name: string, over: Partial<DoDroplet> = {
 
 export function fakeDo(opts: FakeDoOptions = {}) {
   const droplets: DoDroplet[] = (opts.droplets ?? []).map((d) => structuredClone(d));
-  const tags = new Set(opts.tags ?? droplets.flatMap((d) => d.tags ?? []));
   const calls: FakeCall[] = [];
   const polls = new Map<number, number>();
   let nextId = 9000;
@@ -114,30 +114,10 @@ export function fakeDo(opts: FakeDoOptions = {}) {
         networks: { v4: [], v6: [] },
       });
       droplets.push(d);
-      for (const t of d.tags ?? []) tags.add(t);
       return json(202, { droplet: d, links: { actions: [] } });
-    }
-    if (method === "GET" && (m = /^\/tags\/([^/]+)$/.exec(path))) {
-      const t = decodeURIComponent(m[1]!);
-      return tags.has(t) ? json(200, { tag: { name: t } }) : json(404, { id: "not_found", message: "tag not found" });
-    }
-    if (method === "POST" && path === "/tags") {
-      const t = (call.body as { name: string }).name;
-      tags.add(t);
-      return json(201, { tag: { name: t } });
-    }
-    if ((method === "POST" || method === "DELETE") && (m = /^\/tags\/([^/]+)\/resources$/.exec(path))) {
-      const t = decodeURIComponent(m[1]!);
-      if (!tags.has(t)) return json(404, { id: "not_found", message: "tag not found" });
-      for (const r of (call.body as { resources: Array<{ resource_id: string }> }).resources) {
-        const d = droplets.find((x) => String(x.id) === r.resource_id);
-        if (!d) return json(404, { id: "not_found", message: "droplet not found" });
-        d.tags = method === "POST" ? [...new Set([...(d.tags ?? []), t])] : (d.tags ?? []).filter((x) => x !== t);
-      }
-      return json(204);
     }
     return json(404, { id: "not_found", message: `fake has no route ${method} ${path}` });
   };
 
-  return { fetch, calls, droplets, tags, writes: () => calls.filter((c) => c.method !== "GET") };
+  return { fetch, calls, droplets, writes: () => calls.filter((c) => c.method !== "GET") };
 }

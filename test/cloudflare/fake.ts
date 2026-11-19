@@ -5,11 +5,13 @@
 // Everything here is fake: example.com/.net/.org, RFC 5737 and 10.0.x.x addresses, placeholder ids.
 
 import { buildDesired, type DesiredState } from "../../src/core/desired.js";
-import type { AccountConfig, AllowTunnel, DropletFile, InfraConfig, WebException, WebSpec } from "../../src/core/model.js";
+import { dropletFromData } from "../../src/core/loader.js";
+import type { AccountConfig, AllowTunnel, DropletFile, EnvName, InfraConfig } from "../../src/core/model.js";
+import { convertLegacy } from "../../src/export/convert.js";
+import { parsePort, parseWho } from "../../src/core/values.js";
 import type { ObservedDroplet } from "../../src/core/observed.js";
 import { isChange, type ApplyResult, type ModulePlan, type PlanOp, type RunContext } from "../../src/core/plan.js";
 import { Secrets } from "../../src/core/secrets.js";
-import { parsePort, parseWho } from "../../src/core/values.js";
 import { freezeOps } from "../../src/engine.js";
 import { applyCloudflare, observeCloudflare, planCloudflare } from "../../src/cloudflare/index.js";
 import type { AccessApp, CloudflareObserved, DnsRecord, InfraTarget, TunnelConfiguration, Zone } from "../../src/cloudflare/types.js";
@@ -38,15 +40,14 @@ export function testAccount(over: Partial<AccountConfig["cloudflare"]> = {}): Ac
       tunnels: { nyc1: T_NYC1, blr1: T_BLR1, sfo3: T_SFO3 },
       staff_policy_id: STAFF_POLICY,
       service_tokens: { "ci-staging": STAGING_TOKEN, etl: ETL_TOKEN, uptime: UPTIME_TOKEN },
-      ci_deploy_tokens: { prod: [], staging: ["ci-staging"], internal: [] },
       guards: { max_deletes: 20, max_delete_fraction: 0.3 },
       ...over,
     },
     digitalocean: { regions: { prod: "nyc1", staging: "blr1", internal: "blr1" } },
     github: { infra_repo: "example-org/infra", ssh_config_branch: "ssh-config", ssh_config_file: "ssh_config" },
     ssh_config: { title: "Example Co droplets", user: "ubuntu" },
-    ssh_email_domain: "example.com",
-    ssh_groups: { admins: [...ADMINS] },
+    email_domain: "example.com",
+    groups: { admins: [...ADMINS] },
   };
 }
 
@@ -76,7 +77,13 @@ export function droplet(id: number, name: string, region: string, ip: string | n
   return { id, name, region, privateIp: ip, publicIp: `203.0.113.${id % 250}`, tags };
 }
 
-/** The Worker's web-config.json entry for one site (exceptions in the new shape). */
+/** A web-config.json exception, as the Worker reads it (plus service_tokens, which the tool added). */
+export interface WebException {
+  path: string;
+  allow: "everyone" | { ips?: string[]; service_tokens?: string[] };
+}
+
+/** The Worker's web-config.json entry for one site. */
 export interface SiteCfg {
   hostnames?: string[];
   origin?: string;
@@ -111,6 +118,10 @@ export class FakeCloudflare {
   frozen = new Set<string>();
   /** A droplet file's ssh list, by droplet name; default ["admins"] (= ADMINS, the Worker's admins). */
   ssh: Record<string, string[]> = {};
+  /** A droplet file's web section as written (web.access ...), in place of the one its tags and f.sites give. */
+  web: Record<string, Record<string, unknown>> = {};
+  /** The Worker's CI_SERVICE_TOKEN_IDS, by name: what a ci-deploy tag becomes in a droplet file's ssh list. */
+  ciTokens: Partial<Record<EnvName, string[]>> = { staging: ["ci-staging"] };
   /** Droplet files with a profile for a droplet that does not exist yet (status create): name -> env. */
   toCreate: Record<string, { env: "prod" | "staging" | "internal"; tags?: string[] }> = {};
 
@@ -295,35 +306,35 @@ export function exampleFixture(): FakeCloudflare {
 
 const ENVS = { "env-prod": "prod", "env-staging": "staging", "env-internal": "internal" } as const;
 
+/**
+ * The droplet file for a Worker-style droplet: its tags and site, converted as the export does
+ * (src/export/convert.ts), so every ported Worker scenario also tests that mapping.
+ */
 function fileFor(f: FakeCloudflare, name: string, tags: string[]): DropletFile {
   const envs = tags.filter((t): t is keyof typeof ENVS => t in ENVS).map((t) => ENVS[t]);
-  const site = f.sites[name];
   const staff = tags.includes("web-staff");
   const pub = tags.includes("web-public");
   if (staff && pub) throw new Error(`${name}: a droplet file can't have both web-staff and web-public`);
   if (envs.length > 1) throw new Error(`${name}: a droplet file has at most one env`);
-  const web: WebSpec | undefined =
-    staff || pub
-      ? {
-          exposure: staff ? "staff" : "public",
-          ...(site?.origin ? { origin: site.origin } : {}),
-          hostnames: [...(site?.hostnames ?? [])],
-          ...(site?.protected_paths ? { protected_paths: [...site.protected_paths] } : {}),
-          exceptions: (site?.exceptions ?? []).map((e) => ({ ...e })),
-          ...(site?.health_path ? { health_path: site.health_path } : {}),
-          health_accept_app_404: site?.health_accept_app_404 ?? false,
-        }
-      : undefined;
+  const site = f.sites[name];
+  const { spec } = convertLegacy(
+    {
+      name,
+      ...(envs[0] ? { env: envs[0] } : {}),
+      ciDeploy: tags.includes("ci-deploy"),
+      ...(staff || pub ? { exposure: staff ? ("staff" as const) : ("public" as const) } : {}),
+      ...(site ? { site: { ...site, ...(site.exceptions ? { exceptions: site.exceptions.map((e) => ({ ...e })) } : {}) } } : {}),
+      frozen: f.frozen.has(name),
+      people: f.ssh[name] ?? ["admins"],
+    },
+    f.ciTokens,
+  );
+  if (f.web[name]) spec.web = structuredClone(f.web[name]);
+  const res = dropletFromData(spec, `droplets/${name}.yaml`);
+  if (!res.file) throw new Error(`${name}: the converted droplet file does not load: ${JSON.stringify(res.diagnostics)}`);
+  // allow.tunnel as written, without the loader's rules (some tests plan routes the loader rejects).
   const tunnel: AllowTunnel[] = (f.routes[name] ?? []).map((r) => ({ route: r.route, port: parsePort(r.port), who: r.who.map(parseWho) }));
-  return {
-    name,
-    ...(envs[0] ? { env: envs[0] } : {}),
-    deploy: tags.includes("ci-deploy"),
-    frozen: f.frozen.has(name),
-    ssh: f.ssh[name] ?? ["admins"],
-    ...(web ? { web } : {}),
-    allow: { droplet: [], tunnel, ip: [] },
-  };
+  return { ...res.file, allow: { ...res.file.allow, tunnel } };
 }
 
 export function desiredFor(f: FakeCloudflare, account: AccountConfig = testAccount()): DesiredState {

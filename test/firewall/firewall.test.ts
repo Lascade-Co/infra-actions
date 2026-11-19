@@ -218,9 +218,13 @@ describe("planFirewall (report-only)", () => {
     expect(plan.unchanged).toBe(2);
   });
 
-  it("attaches tag firewalls to a droplet still to be created by the tags it will get", async () => {
+  it("attaches tag firewalls to a droplet still to be created by the tags it will get (its env's old firewall tag)", async () => {
     const plan = planFirewall(await desired(), {
-      firewalls: [fw({ name: "fw-env", tags: ["env-staging"], inbound_rules: [{ protocol: "tcp", ports: "80", sources: { addresses: ["0.0.0.0/0"] } }] })],
+      firewalls: [
+        fw({ name: "fw-env", tags: ["staging"], inbound_rules: [{ protocol: "tcp", ports: "80", sources: { addresses: ["0.0.0.0/0"] } }] }),
+        // the Worker's env tag is never put on a new droplet (decision 20): this one covers nothing new
+        fw({ name: "fw-old-env", tags: ["env-staging"], inbound_rules: [{ protocol: "tcp", ports: "81", sources: { addresses: ["0.0.0.0/0"] } }] }),
+      ],
     });
     expect(plan.ops.filter((o) => o.droplet === "staging-shop.example.com")).toEqual([
       expect.objectContaining({ key: "fw-env inbound tcp/80 0.0.0.0/0 on staging-shop.example.com", action: "report", pending: true }),

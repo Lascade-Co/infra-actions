@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import { main } from "../../src/cli.js";
-import { loadInfraDir } from "../../src/core/loader.js";
+import { loadInfraDir, loadInfraFiles } from "../../src/core/loader.js";
 import { buildExport, type ExportInput } from "../../src/export/index.js";
 import { parseExportArgs, parseWranglerVars } from "../../src/export/run.js";
 import { observedDroplet, tempDir } from "../helpers.js";
@@ -112,13 +112,16 @@ describe("parseWranglerVars", () => {
 describe("buildExport", () => {
   it("writes the account from the Worker's vars and the base", () => {
     const { files } = buildExport(input());
-    const a = doc(files, "account.yaml") as { cloudflare: Record<string, unknown>; ssh_groups: Record<string, string[]>; telegram: unknown; ssh_email_domain: string };
+    const a = doc(files, "account.yaml") as { cloudflare: Record<string, unknown>; groups: Record<string, string[]>; telegram: unknown; email_domain: string };
     expect(a.cloudflare.tunnels).toEqual({ nyc1: "00000000-0000-4000-8000-000000000001", blr1: "00000000-0000-4000-8000-000000000002" });
+    // CI tokens are plain service tokens, named ci-<first env that uses the id>
     expect(a.cloudflare.service_tokens).toEqual({ "ci-prod": "00000000-0000-4000-8000-000000000101", "ci-staging": "00000000-0000-4000-8000-000000000102" });
-    expect(a.cloudflare.ci_deploy_tokens).toEqual({ prod: ["ci-prod"], staging: ["ci-staging"], internal: ["ci-prod"] });
+    expect(a.cloudflare).not.toHaveProperty("ci_deploy_tokens");
     expect(a.cloudflare.guards).toEqual({ max_deletes: 20, max_delete_fraction: 0.3 });
-    expect(a.ssh_groups).toEqual({ admins: ["admin@example.com", "ops@example.com"] });
-    expect(a.ssh_email_domain).toBe("example.com");
+    expect(a.groups).toEqual({ admins: ["admin@example.com", "ops@example.com"] });
+    expect(a.email_domain).toBe("example.com");
+    expect(a).not.toHaveProperty("ssh_groups");
+    expect(a).not.toHaveProperty("ssh_email_domain");
     expect(a.telegram).toEqual({ chat_id: "-1000000000000" });
   });
 
@@ -127,7 +130,9 @@ describe("buildExport", () => {
     const { files } = buildExport(input({ base, zones: ["Example.com", "example.net"] }));
     const cf = doc(files, "account.yaml").cloudflare as Record<string, unknown>;
     expect(cf.zones).toEqual(["example.com", "example.net"]);
-    expect(cf.ci_deploy_tokens).toEqual({ prod: ["deploy"], staging: ["ci-staging"], internal: ["deploy"] });
+    expect(cf.service_tokens).toEqual({ deploy: "00000000-0000-4000-8000-000000000101", "ci-staging": "00000000-0000-4000-8000-000000000102" });
+    expect(doc(files, "droplets/shop.example.com.yaml").ssh).toEqual(["admins", "token:deploy"]);
+    expect(doc(files, "droplets/legacy.example.com.yaml").ssh).toEqual(["admins", "token:deploy"]);
   });
 
   it("writes one file per droplet the Worker manages, from its tags and web-config.json", () => {
@@ -136,26 +141,29 @@ describe("buildExport", () => {
     expect(doc(files, "droplets/shop.example.com.yaml")).toEqual({
       name: "shop.example.com",
       env: "prod",
-      deploy: true,
-      ssh: ["admins"],
+      ssh: ["admins", "token:ci-prod"],
       web: {
-        exposure: "public",
         origin: "http://{ip}:80",
         hostnames: ["shop.example.net"],
-        protected_paths: ["/admin", "/internal"],
-        exceptions: [{ path: "/webhooks/payments", allow: "everyone" }],
+        access: {
+          "/": ["everyone"],
+          "/admin": ["staff"],
+          "/internal": ["staff"],
+          "/webhooks/payments": ["everyone"],
+          "/healthcheck/": ["everyone"],
+        },
         health_path: "/healthcheck/",
       },
     });
     // staff: protected_paths dropped (the Worker ignores them), the rest kept
     expect(doc(files, "droplets/tools.example.net.yaml").web).toEqual({
-      exposure: "staff",
-      exceptions: [{ path: "/api", allow: { ips: ["198.51.100.0/24"] } }],
+      access: { "/": ["staff"], "/api": ["ip:198.51.100.0/24"] },
       health_path: "/status",
       health_accept_app_404: true,
     });
-    // no env tag: no env; no web tag: no web, even with a web-config.json entry
-    expect(doc(files, "droplets/legacy.example.com.yaml")).toEqual({ name: "legacy.example.com", env: "prod", deploy: true, ssh: ["admins"] });
+    // no web tag: no web, even with a web-config.json entry; ci-deploy without a site: the token only
+    expect(doc(files, "droplets/legacy.example.com.yaml")).toEqual({ name: "legacy.example.com", env: "prod", ssh: ["admins", "token:ci-prod"] });
+    for (const f of Object.keys(files)) expect(doc(files, f)).not.toHaveProperty("deploy");
     expect(doc(files, "droplets/db.example.com.yaml")).toMatchObject({ name: "db.example.com", frozen: true, ssh: ["admins"] });
     expect(doc(files, "droplets/db.example.com.yaml")).not.toHaveProperty("env");
     expect(doc(files, "droplets/both.example.com.yaml")).not.toHaveProperty("web");
@@ -166,14 +174,17 @@ describe("buildExport", () => {
     const { notes } = buildExport(input());
     expect(notes.leftOut).toEqual([{ name: "quiet.example.com", reason: expect.stringContaining("no tags") }]);
     expect(notes.notManaged.map((n) => n.name).sort()).toEqual(["build-box", "far.example.com"]);
-    expect(notes.webNotWritten.map((n) => n.name).sort()).toEqual(["gone.example.com", "legacy.example.com", "tools.example.net"]);
+    expect(notes.webNotWritten.map((n) => n.name).sort()).toEqual(["gone.example.com", "legacy.example.com"]);
     expect(notes.warnings.join("\n")).toContain("both.example.com: tagged both");
+    // converter notes go into the warnings, prefixed with the droplet name
+    expect(notes.warnings).toContain("tools.example.net: protected_paths on a web-staff site (the Worker ignores them too): not written");
   });
 
-  it("includes untagged droplets when asked", () => {
-    const { notes } = buildExport(input({ includeUntagged: true }));
+  it("includes untagged droplets when asked, with ssh: [admins] only", () => {
+    const { files, notes } = buildExport(input({ includeUntagged: true }));
     expect(notes.written).toContain("quiet.example.com");
     expect(notes.leftOut).toEqual([]);
+    expect(doc(files, "droplets/quiet.example.com.yaml")).toEqual({ name: "quiet.example.com", ssh: ["admins"] });
   });
 
   it("adds drafts under a DRAFT comment and drops the entries the checks reject", () => {
@@ -194,6 +205,127 @@ describe("buildExport", () => {
         expect.stringMatching(/^nobody\.example\.com drafts for a droplet that gets no file/),
       ]),
     );
+  });
+});
+
+describe("buildExport: the droplet file format (web.access, ssh tokens)", () => {
+  const APP = "app.example.com";
+  const BASE_TOKENS = { ...BASE, cloudflare: { ...BASE.cloudflare, service_tokens: { uptime: "00000000-0000-4000-8000-000000000105" } } };
+
+  /** One droplet, its web-config.json entry (if any), exported; the result must load with no error. */
+  function one(tags: string[], site?: Record<string, unknown>, over: Partial<ExportInput> = {}) {
+    const res = buildExport(
+      input({
+        droplets: [observedDroplet(APP, { id: 20, privateIpv4: "10.0.0.20", tags })],
+        webConfig: { sites: site ? { [APP]: site } : {} },
+        base: BASE_TOKENS,
+        drafts: undefined,
+        frozen: [],
+        ...over,
+      }),
+    );
+    expect(loadInfraFiles(res.files).diagnostics.filter((d) => d.level === "error")).toEqual([]);
+    return { spec: doc(res.files, `droplets/${APP}.yaml`), notes: res.notes, files: res.files };
+  }
+
+  it("web-staff: \"/\": [staff]", () => {
+    expect(one(["env-prod", "web-staff"]).spec).toEqual({ name: APP, env: "prod", ssh: ["admins"], web: { access: { "/": ["staff"] } } });
+  });
+
+  it("web-public with no protected_paths: \"/\": [everyone] and the default /admin as [staff]", () => {
+    expect(one(["env-prod", "web-public"], { origin: "http://{ip}:80" }).spec.web).toEqual({
+      origin: "http://{ip}:80",
+      access: { "/": ["everyone"], "/admin": ["staff"] },
+    });
+  });
+
+  it("web-public with protected_paths: each as [staff], spelled as web-config.json spells it, instead of /admin", () => {
+    expect(one(["env-prod", "web-public"], { protected_paths: ["/wp-admin/", "/Internal"] }).spec.web).toEqual({
+      access: { "/": ["everyone"], "/wp-admin/": ["staff"], "/Internal": ["staff"] },
+    });
+  });
+
+  it("an exception open to everyone: [everyone]; one with ips and service tokens: [ip:..., token:...]", () => {
+    const { spec } = one(["env-prod", "web-staff"], {
+      exceptions: [
+        { path: "/webhooks/payments", allow: "everyone" },
+        { path: "/api/partner", allow: { ips: ["198.51.100.0/24", "203.0.113.9"], service_tokens: ["uptime"] } },
+      ],
+    });
+    expect(spec.web).toEqual({
+      access: {
+        "/": ["staff"],
+        "/webhooks/payments": ["everyone"],
+        "/api/partner": ["ip:198.51.100.0/24", "ip:203.0.113.9", "token:uptime"],
+      },
+    });
+  });
+
+  it("ci-deploy with a site: the env's CI token in ssh and \"/healthcheck/\": [everyone]; no deploy key", () => {
+    const { spec } = one(["env-staging", "ci-deploy", "web-staff"], {});
+    expect(spec).toEqual({
+      name: APP,
+      env: "staging",
+      ssh: ["admins", "token:ci-staging"],
+      web: { access: { "/": ["staff"], "/healthcheck/": ["everyone"] } },
+    });
+  });
+
+  it("ci-deploy with a site: an exception on /healthcheck is left to the healthcheck rule, with a note", () => {
+    const { spec, notes } = one(["env-prod", "ci-deploy", "web-public"], { exceptions: [{ path: "/healthcheck", allow: { ips: ["192.0.2.1"] } }] });
+    expect(spec.web).toEqual({ access: { "/": ["everyone"], "/admin": ["staff"], "/healthcheck/": ["everyone"] } });
+    expect(notes.warnings).toEqual([expect.stringMatching(/^app\.example\.com: exception \/healthcheck: the Worker leaves it to the public healthcheck bypass/)]);
+  });
+
+  it("ci-deploy without a site: the token only, no web", () => {
+    expect(one(["env-prod", "ci-deploy"]).spec).toEqual({ name: APP, env: "prod", ssh: ["admins", "token:ci-prod"] });
+  });
+
+  it("ci-deploy in internal uses the token name the Worker vars give internal (here prod's token)", () => {
+    const { spec, files } = one(["env-internal", "ci-deploy"]);
+    expect(spec.ssh).toEqual(["admins", "token:ci-prod"]);
+    expect(Object.keys((doc(files, "account.yaml").cloudflare as { service_tokens: object }).service_tokens)).not.toContain("ci-internal");
+  });
+
+  it("ci-deploy without one env tag: no token, with a note", () => {
+    const { spec, notes } = one(["ci-deploy"]);
+    expect(spec).toEqual({ name: APP, ssh: ["admins"] });
+    expect(notes.warnings).toEqual([expect.stringMatching(/^app\.example\.com: tagged ci-deploy without one environment tag/)]);
+  });
+
+  // A base domain other than SSH_ADMIN_EMAILS' (example.com) shows the domain really comes from the base.
+  const exportBase = (base: Record<string, unknown>) => {
+    const { files, notes } = buildExport(input({ droplets: [observedDroplet(APP, { id: 20, privateIpv4: "10.0.0.20", tags: ["env-prod"] })], base, drafts: undefined, frozen: [] }));
+    return { a: doc(files, "account.yaml"), notes };
+  };
+
+  it("with no domain in the base, takes email_domain from SSH_ADMIN_EMAILS", () => {
+    const { a, notes } = exportBase(BASE);
+    expect(a.email_domain).toBe("example.com");
+    expect(a.groups).toEqual({ admins: ["admin@example.com", "ops@example.com"] });
+    expect(notes.warnings.join("\n")).not.toContain("SSH_ADMIN_EMAILS has addresses outside");
+  });
+
+  it("keeps groups and email_domain from an account base in the current format, admins from SSH_ADMIN_EMAILS", () => {
+    const { a, notes } = exportBase({ ...BASE, email_domain: "example.net", groups: { "shop-team": ["dev@example.net"] } });
+    expect(a.email_domain).toBe("example.net");
+    expect(a.groups).toEqual({ "shop-team": ["dev@example.net"], admins: ["admin@example.com", "ops@example.com"] });
+    expect(notes.warnings).toContain("SSH_ADMIN_EMAILS has addresses outside example.net; the checks will reject them");
+  });
+
+  it("reads an account base in the old format (ssh_email_domain, ssh_groups) and writes the new keys", () => {
+    const { a, notes } = exportBase({ ...BASE, ssh_email_domain: "example.net", ssh_groups: { "shop-team": ["dev@example.net"] } });
+    expect(a.email_domain).toBe("example.net");
+    expect(a.groups).toEqual({ "shop-team": ["dev@example.net"], admins: ["admin@example.com", "ops@example.com"] });
+    expect(a).not.toHaveProperty("ssh_email_domain");
+    expect(a).not.toHaveProperty("ssh_groups");
+    expect(notes.warnings).toContain("SSH_ADMIN_EMAILS has addresses outside example.net; the checks will reject them");
+  });
+
+  it("prefers the new keys when the base has both spellings", () => {
+    const { a } = exportBase({ ...BASE, email_domain: "example.com", ssh_email_domain: "example.net", groups: { ops: ["ops@example.com"] }, ssh_groups: { old: ["dev@example.net"] } });
+    expect(a.email_domain).toBe("example.com");
+    expect(a.groups).toEqual({ ops: ["ops@example.com"], admins: ["admin@example.com", "ops@example.com"] });
   });
 });
 

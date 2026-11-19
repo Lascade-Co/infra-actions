@@ -1,13 +1,13 @@
-// Sites (web.exposure staff / public), ported from the infra-sync Worker's "sites: ..." tests with
-// fake data. The Worker's web tags become the droplet file's web.exposure (fake.ts turns the tags
-// into files) and web-config.json becomes f.sites.
+// Sites (web.access), ported from the infra-sync Worker's "sites: ..." tests with fake data. The
+// Worker's web tags and web-config.json (f.sites) become the droplet file's web.access the way the
+// export converts them (fake.ts -> src/export/convert.ts): web-staff is "/": [staff], web-public
+// "/": [everyone] plus each protected path as [staff], an exception its who-list.
 //
 // Not ported: web-config.json parsing (the loader's job), the test against the Worker's bundled
 // web-config.json (real data), "both tags at once" (a droplet file can't say it), the Worker's dry
 // run (here: a plan without apply) and the cutover / health-watch parts (they stay in the Worker).
 
 import { describe, expect, it } from "vitest";
-import type { WebException } from "../../src/core/model.js";
 import type { PlanOp } from "../../src/core/plan.js";
 import type { IngressRule } from "../../src/cloudflare/types.js";
 import {
@@ -25,6 +25,7 @@ import {
   type RunResult,
   type SiteCfg,
   STAFF_POLICY,
+  type WebException,
   T_BLR1,
   T_NYC1,
   Z_COM,
@@ -305,9 +306,9 @@ describe("sites: exceptions and origins", () => {
   });
 
   it("leaves <droplet>/healthcheck to the deploy target's healthcheck bypass", async () => {
+    // The export writes the exception as the public /healthcheck/ (the Worker left it to the bypass).
     const f = withPilot(["web-staff", "ci-deploy"], { [PILOT]: { exceptions: [everyone("/healthcheck")] } });
-    const r = await run(f);
-    expect(r.warnings.join("\n")).toMatch(/staging-pilot\.example\.com\/healthcheck: is the public healthcheck bypass/);
+    await run(f);
     expect(f.apps.filter((a) => (a.domain ?? "").endsWith("/healthcheck") && a.domain!.startsWith(PILOT)).map((a) => a.name)).toEqual([
       `infra-sync: healthcheck ${PILOT}`,
     ]);
@@ -403,7 +404,7 @@ describe("sites: exposure changes and removal", () => {
   it("a public site with no usable protected path gets nothing (never a route without a login)", async () => {
     const f = withPilot(["web-public", "ci-deploy"], { [PILOT]: { protected_paths: ["/healthcheck"] } });
     const r = await run(f);
-    expect(r.warnings.join("\n")).toMatch(/no usable protected path/);
+    expect(r.warnings.join("\n")).toMatch(/nothing on it needs a login/);
     expect(route(f, PILOT)).toBeUndefined();
     expect(siteDns(f, PILOT)).toEqual([]);
   });

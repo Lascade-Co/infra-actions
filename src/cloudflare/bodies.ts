@@ -2,7 +2,9 @@
 // behaviour from the infra-sync Worker (src/plan.ts there): every predicate here is what decides
 // whether the tool sees a difference against what the Worker built, so keep them exactly as they are.
 // Changed on purpose (decision 18): the infrastructure apps (one per SSH access set, ubuntu only),
-// the target tags (plus ssh-access=<set id>) and the people on each droplet's ssh- app.
+// the target tags (plus ssh-access=<set id>) and the people on each droplet's ssh- app. Decision 19:
+// the site apps are built from web.access who-lists (webAccessAppBody); for the lists the Worker's
+// sites had ([staff], [everyone], IPs) the bodies are exactly the Worker's.
 
 import { createHash } from "node:crypto";
 import {
@@ -24,7 +26,7 @@ import {
   WEB_APP_PREFIX,
   WEB_EXCEPTION_APP_PREFIX,
 } from "../core/constants.js";
-import type { EnvName, WebException, Who } from "../core/model.js";
+import type { EnvName, Who } from "../core/model.js";
 import { type IngressTarget, protectedPathRegex } from "./ingress.js";
 import type { AccessApp, AccessPolicy, AccessRule, DnsRecord, InfraTarget } from "./types.js";
 
@@ -192,11 +194,12 @@ export const sameTags = (a: Record<string, string> | undefined, b: Record<string
 // ---------- SSH access sets (decision 18) ----------
 
 /**
- * A stable id for a set of people who may SSH (lowercase, deduplicated, sorted emails): the first
- * 12 hex digits of its SHA-256. Droplets with the same people share one infrastructure app.
+ * A stable id for a set of people who may SSH (lowercase, deduplicated, sorted emails, plus
+ * "@<domain>" when the list has `staff`): the first 12 hex digits of its SHA-256. Droplets with the
+ * same people share one infrastructure app.
  */
-export function sshAccessSetId(emails: readonly string[]): string {
-  const norm = [...new Set(emails.map((e) => e.trim().toLowerCase()))].sort();
+export function sshAccessSetId(emails: readonly string[], staffDomain?: string): string {
+  const norm = [...new Set([...emails.map((e) => e.trim().toLowerCase()), ...(staffDomain ? [`@${lc(staffDomain)}`] : [])])].sort();
   return createHash("sha256").update(norm.join("\n")).digest("hex").slice(0, 12);
 }
 
@@ -217,6 +220,8 @@ export function sshAccessOf(apps: readonly AccessApp[]): SshAccessView {
       for (const r of p.include ?? []) {
         const e = (r as { email?: { email?: string } }).email?.email;
         if (e) emails.add(lc(e));
+        const d = (r as { email_domain?: { domain?: string } }).email_domain?.domain;
+        if (d) emails.add(`*@${lc(d)}`);
       }
       for (const u of p.connection_rules?.ssh?.usernames ?? []) users.add(u);
     }
@@ -234,26 +239,38 @@ export function appSelects(a: AccessApp, tags: Record<string, string> | undefine
 }
 
 const emailRules = (emails: string[]): AccessRule[] => emails.map((email) => ({ email: { email } }));
+/** The people of an SSH access list: its emails, then (for `staff`) everyone with an address in the domain. */
+const peopleRules = (emails: string[], staffDomain?: string): AccessRule[] => [
+  ...emailRules(emails),
+  ...(staffDomain ? [{ email_domain: { domain: lc(staffDomain) } } as AccessRule] : []),
+];
 const tokenRules = (ids: string[]): AccessRule[] => ids.map((token_id) => ({ service_token: { token_id } }));
 
-/**
- * The droplet's ssh- route app: CI deploy tokens (deploy targets), then the droplet's SSH access
- * list. The policy keeps the Worker's name "ssh-admins", so a droplet whose list equals the Worker's
- * admins shows no change.
- */
 /** Name of the Allow policy on a droplet's ssh- app that lists its people (the Worker's name). */
 export const SSH_LIST_POLICY = `${NAME_PREFIX} ssh-admins`;
 
-export function appBody(sshHostname: string, sshEmails: string[], tokenIds: string[], env?: EnvName): AppBody {
+/**
+ * The Service Auth policy of the ssh- app for the `token:` entries of the ssh list. Its name keeps
+ * the Worker's "ci-deploy (<env>)" (so the live apps show no change), "ci-deploy" for a droplet
+ * with no env.
+ */
+export const sshTokenPolicyName = (env?: EnvName): string => `${NAME_PREFIX} ci-deploy${env ? ` (${env})` : ""}`;
+
+/**
+ * The droplet's ssh- route app: Service Auth for the ssh list's service tokens (e.g. CI's), then the
+ * people of the list. The policy keeps the Worker's name "ssh-admins", so a droplet whose list
+ * equals the Worker's admins shows no change. `staffDomain`: the list has `staff`.
+ */
+export function appBody(sshHostname: string, sshEmails: string[], tokenIds: string[], env?: EnvName, staffDomain?: string): AppBody {
   const policies: AccessPolicy[] = [];
   if (tokenIds.length) {
     policies.push({
-      name: `${NAME_PREFIX} ci-deploy (${env})`,
+      name: sshTokenPolicyName(env),
       decision: "non_identity", // "Service Auth"
       include: tokenRules(tokenIds),
     });
   }
-  policies.push({ name: SSH_LIST_POLICY, decision: "allow", include: emailRules(sshEmails) });
+  policies.push({ name: SSH_LIST_POLICY, decision: "allow", include: peopleRules(sshEmails, staffDomain) });
   policies.forEach((p, i) => (p.precedence = i + 1));
   return {
     name: `${NAME_PREFIX} ${sshHostname}`,
@@ -270,7 +287,7 @@ export function appBody(sshHostname: string, sshEmails: string[], tokenIds: stri
  * A frozen droplet's ssh- app with only its people changed: the existing app as it is, with the
  * include list of its SSH_LIST_POLICY replaced. Undefined when the app has no such policy.
  */
-export function sshListOnlyAppBody(existing: AccessApp, sshEmails: string[]): AppBody | undefined {
+export function sshListOnlyAppBody(existing: AccessApp, sshEmails: string[], staffDomain?: string): AppBody | undefined {
   const ps = existing.policies ?? [];
   if (!ps.some((p) => p.name === SSH_LIST_POLICY && p.decision === "allow")) return undefined;
   return {
@@ -283,7 +300,7 @@ export function sshListOnlyAppBody(existing: AccessApp, sshEmails: string[]): Ap
       ...(p.id ? { id: p.id } : {}),
       name: p.name,
       decision: p.decision,
-      include: p.name === SSH_LIST_POLICY && p.decision === "allow" ? emailRules(sshEmails) : p.include,
+      include: p.name === SSH_LIST_POLICY && p.decision === "allow" ? peopleRules(sshEmails, staffDomain) : p.include,
       ...(p.exclude?.length ? { exclude: p.exclude } : {}),
       ...(p.require?.length ? { require: p.require } : {}),
       precedence: p.precedence ?? i + 1,
@@ -291,7 +308,8 @@ export function sshListOnlyAppBody(existing: AccessApp, sshEmails: string[]): Ap
   };
 }
 
-export function infraAppBody(setId: string, emails: string[]): InfraAppBody {
+/** `staffDomain`: the set has `staff` (anyone with an address in that domain). Service tokens never go here (no short-lived certificates). */
+export function infraAppBody(setId: string, emails: string[], staffDomain?: string): InfraAppBody {
   return {
     name: infraAppName(setId),
     type: "infrastructure",
@@ -300,7 +318,7 @@ export function infraAppBody(setId: string, emails: string[]): InfraAppBody {
       {
         name: `${NAME_PREFIX} ssh-access`,
         decision: "allow",
-        include: emailRules(emails),
+        include: peopleRules(emails, staffDomain),
         connection_rules: { ssh: { usernames: [SSH_USERNAME] } },
         precedence: 1,
       },
@@ -329,47 +347,80 @@ export function healthAppBody(dropletName: string): AppBody {
 
 const STAFF_SESSION = "24h";
 
-/** A staff site: the whole hostname, for the account's reusable "staff" policy. */
-export function webSiteAppBody(hostname: string, staffPolicyId: string): WebAppBody {
-  return {
-    name: WEB_APP_PREFIX + hostname,
-    type: "self_hosted",
-    domain: hostname,
-    app_launcher_visible: false,
-    session_duration: STAFF_SESSION,
-    // Devices enrolled in the Cloudflare One client get in on their WARP session, without a login page.
-    allow_authenticate_via_warp: true,
-    policies: [{ id: staffPolicyId, precedence: 1 }],
-  };
+/**
+ * A web.access who-list resolved for one Access app: groups expanded to emails, token names to ids,
+ * CIDRs normalised (each list deduplicated and sorted).
+ */
+export interface ResolvedWho {
+  everyone: boolean;
+  staff: boolean;
+  emails: string[];
+  ips: string[];
+  tokenIds: string[];
 }
 
-/** A public site: one protected path (e.g. /admin), for the reusable "staff" policy. */
-export function webAdminAppBody(hostname: string, path: string, staffPolicyId: string): WebAppBody {
-  return { ...webSiteAppBody(hostname, staffPolicyId), name: `${WEB_ADMIN_APP_PREFIX}${hostname}${path}`, domain: `${hostname}${path}` };
+/** Policy names (the Worker's for the IP bypass; "web exception service tokens" was the tool's own). */
+export const WEB_BYPASS_POLICY = `${NAME_PREFIX} web exception`;
+export const WEB_TOKENS_POLICY = `${NAME_PREFIX} web exception service tokens`;
+export const WEB_PEOPLE_POLICY = `${NAME_PREFIX} web people`;
+
+/**
+ * The policies of a who-list, in this order: Bypass for everyone (alone), Bypass for the IP ranges,
+ * Service Auth for the tokens, the reusable staff policy, one Allow policy for the groups' and
+ * emails' people. [staff] is the Worker's site/admin body; [everyone] and IP lists its exception body.
+ */
+export function accessPolicies(who: ResolvedWho, staffPolicyId: string): Array<AccessPolicy | PolicyLink> {
+  if (who.everyone) return [{ name: WEB_BYPASS_POLICY, decision: "bypass", include: [{ everyone: {} }], precedence: 1 }];
+  const policies: Array<AccessPolicy | PolicyLink> = [];
+  if (who.ips.length) policies.push({ name: WEB_BYPASS_POLICY, decision: "bypass", include: who.ips.map((ip) => ({ ip: { ip } })) });
+  if (who.tokenIds.length) policies.push({ name: WEB_TOKENS_POLICY, decision: "non_identity", include: tokenRules(who.tokenIds) });
+  if (who.staff) policies.push({ id: staffPolicyId, precedence: 0 });
+  if (who.emails.length) policies.push({ name: WEB_PEOPLE_POLICY, decision: "allow", include: emailRules(who.emails) });
+  policies.forEach((p, i) => (p.precedence = i + 1));
+  return policies;
 }
 
 /**
- * An exception path: Bypass for everyone or for IP ranges (exactly the Worker's body), plus, new in
- * this tool, a Service Auth policy for named service tokens (`tokenIds`, resolved by the planner).
+ * The Access app of one web.access rule on one hostname:
+ *  - site:      the root "/" (any list but [everyone]), "infra-sync: web <host>";
+ *  - admin:     a path whose list has a person (staff, group, email), "infra-sync: web-admin <host><path>";
+ *  - exception: a path open without a login (everyone, tokens, IPs), "infra-sync: web-exception <host><path>".
+ * The path is used as written (the names of existing apps embed it). Devices enrolled in the
+ * Cloudflare One client get in on their WARP session when the list has a person.
  */
-export function webExceptionAppBody(hostname: string, e: WebException, tokenIds: string[] = []): WebAppBody {
-  const policies: AccessPolicy[] = [];
-  if (e.allow === "everyone") {
-    policies.push({ name: `${NAME_PREFIX} web exception`, decision: "bypass", include: [{ everyone: {} }] });
-  } else {
-    const ips = e.allow.ips ?? [];
-    if (ips.length) policies.push({ name: `${NAME_PREFIX} web exception`, decision: "bypass", include: ips.map((ip) => ({ ip: { ip } })) });
-    if (tokenIds.length) policies.push({ name: `${NAME_PREFIX} web exception service tokens`, decision: "non_identity", include: tokenRules(tokenIds) });
-  }
-  policies.forEach((p, i) => (p.precedence = i + 1));
+export function webAccessAppBody(kind: WebAppKind, hostname: string, path: string, who: ResolvedWho, staffPolicyId: string): WebAppBody {
+  const person = who.staff || who.emails.length > 0;
+  const name = kind === "site" ? WEB_APP_PREFIX + hostname : `${kind === "admin" ? WEB_ADMIN_APP_PREFIX : WEB_EXCEPTION_APP_PREFIX}${hostname}${path}`;
   return {
-    name: `${WEB_EXCEPTION_APP_PREFIX}${hostname}${e.path}`,
+    name,
     type: "self_hosted",
-    domain: `${hostname}${e.path}`,
+    domain: kind === "site" ? hostname : `${hostname}${path}`,
     app_launcher_visible: false,
     session_duration: STAFF_SESSION,
-    policies,
+    ...(person && !who.everyone ? { allow_authenticate_via_warp: true } : {}),
+    policies: accessPolicies(who, staffPolicyId),
   };
+}
+
+const STAFF_ONLY: ResolvedWho = { everyone: false, staff: true, emails: [], ips: [], tokenIds: [] };
+
+/** A staff site: the whole hostname, for the account's reusable "staff" policy (web.access "/": [staff]). */
+export function webSiteAppBody(hostname: string, staffPolicyId: string): WebAppBody {
+  return webAccessAppBody("site", hostname, "/", STAFF_ONLY, staffPolicyId);
+}
+
+/** A public site's protected path (e.g. /admin), for the reusable "staff" policy (web.access "/admin": [staff]). */
+export function webAdminAppBody(hostname: string, path: string, staffPolicyId: string): WebAppBody {
+  return webAccessAppBody("admin", hostname, path, STAFF_ONLY, staffPolicyId);
+}
+
+/** A path open without a login: Bypass for everyone, or for IP ranges and/or Service Auth for tokens. */
+export function webExceptionAppBody(hostname: string, path: string, allow: "everyone" | { ips?: string[]; tokenIds?: string[] }): WebAppBody {
+  const who: ResolvedWho =
+    allow === "everyone"
+      ? { everyone: true, staff: false, emails: [], ips: [], tokenIds: [] }
+      : { everyone: false, staff: false, emails: [], ips: [...(allow.ips ?? [])], tokenIds: [...(allow.tokenIds ?? [])] };
+  return webAccessAppBody("exception", hostname, path, who, "");
 }
 
 /**
@@ -396,7 +447,8 @@ export function routeAppBody(hostname: string, who: Who[], staffPolicyId: string
 
 /**
  * Tunnel route target: https origins keep their certificate but it is not checked.
- * `notFoundPaths` (protected paths of a public site's extra hostname) become 404 rules before the route.
+ * `notFoundPaths` (on an extra hostname of a site whose "/" is [everyone]: the paths that need a login)
+ * become 404 rules before the route.
  */
 export function webIngress(origin: string | undefined, privateIp: string, notFoundPaths: string[] = []): IngressTarget {
   const service = (origin ?? DEFAULT_WEB_ORIGIN).replace("{ip}", privateIp);

@@ -1,11 +1,13 @@
-# A droplet the tool creates (it has a profile): staging, so it goes to the staging region.
-# Staff-only site; monitors default to one per site hostname.
+# A droplet the tool creates (it has a profile): staging, so it goes to the staging region and is
+# created with the old "staging" firewall tag. Staff-only site; monitors default to one per site
+# hostname. CI deploys with the staging token.
 name: staging-shop.example.com
 description: Storefront staging (example)
 profile: ubuntu-6
 env: staging
-deploy: true
-ssh: [admins, shop-team]
+ssh: [admins, shop-team, token:ci-staging]
 web:
-  exposure: staff
   origin: http://{ip}:80
+  access:
+    /: [staff]
+    /healthcheck/: [everyone]

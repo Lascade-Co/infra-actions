@@ -250,7 +250,7 @@ export async function runEngine(opts: EngineOptions): Promise<RunReport> {
       return;
     }
     if (dropletChanges > 0) {
-      // New droplets now have IPs, tags changed: plan everything again before applying the rest,
+      // New droplets now have IPs: plan everything again before applying the rest,
       // and hold the new plan to the same rule as the first one.
       const firstStage = report.stages.length;
       const again = await plans();

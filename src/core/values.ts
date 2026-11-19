@@ -2,7 +2,7 @@
 // Each throws ValueError with a message that names what was wrong (never the file:
 // the loader adds the file and path).
 
-import type { PortSpec, Who } from "./model.js";
+import type { PortSpec, Who, WhoEntry } from "./model.js";
 
 export class ValueError extends Error {}
 
@@ -53,3 +53,60 @@ export function parseWho(v: string): Who {
 }
 
 export const formatWho = (w: Who): string => (w.kind === "staff" ? "staff" : `service-token:${w.name}`);
+
+// ---------- who-lists (ssh:, web.access) ----------
+
+const GROUP_RE = /^[a-z][a-z0-9-]*$/;
+const EMAIL_RE = /^[^@\s]+@[a-z0-9.-]+\.[a-z]{2,}$/i;
+const TOKEN_RE = /^token:([a-z0-9][a-z0-9_-]*)$/;
+
+/**
+ * One who-list entry: `staff`, `everyone`, `token:<name>`, `ip:<address or CIDR>`, an email
+ * address or a group name. Throws ValueError for anything else. References (does the group or
+ * token exist, is the email in the domain) are checked in src/checks.
+ */
+export function parseWhoEntry(v: string): WhoEntry {
+  if (v === "staff") return { kind: "staff" };
+  if (v === "everyone") return { kind: "everyone" };
+  const t = TOKEN_RE.exec(v);
+  if (t) return { kind: "token", name: t[1]! };
+  if (v.startsWith("ip:")) return { kind: "ip", cidr: parseCidr(v.slice(3)) };
+  if (v.includes("@")) {
+    if (!EMAIL_RE.test(v)) throw new ValueError(`"${v}" is not an email address`);
+    return { kind: "email", email: v.toLowerCase() };
+  }
+  if (GROUP_RE.test(v)) return { kind: "group", name: v };
+  throw new ValueError(`"${v}" must be a group name, an email, staff, everyone, token:<name> or ip:<address>`);
+}
+
+/** The entry as written in a file (an ip: entry with its normalised CIDR). */
+export function formatWhoEntry(w: WhoEntry): string {
+  switch (w.kind) {
+    case "group":
+      return w.name;
+    case "email":
+      return w.email;
+    case "token":
+      return `token:${w.name}`;
+    case "ip":
+      return `ip:${w.cidr}`;
+    default:
+      return w.kind;
+  }
+}
+
+/** Entries that need a person to log in (staff, a group, an email). */
+export const isPersonEntry = (w: WhoEntry): boolean => w.kind === "staff" || w.kind === "group" || w.kind === "email";
+
+/** Parses a list, skipping entries that don't parse (the loader reports them). */
+export function parseWhoList(list: readonly string[]): WhoEntry[] {
+  const out: WhoEntry[] = [];
+  for (const v of list) {
+    try {
+      out.push(parseWhoEntry(v));
+    } catch (e) {
+      if (!(e instanceof ValueError)) throw e;
+    }
+  }
+  return out;
+}

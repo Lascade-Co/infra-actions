@@ -29,10 +29,13 @@ export const LEGACY_INFRA_APP_NAME = "infra-sync: SSH targets";
 export const SSH_ACCESS_TAG_KEY = "ssh-access";
 /** The only SSH username the infrastructure apps allow. Root only through the DigitalOcean web console. */
 export const SSH_USERNAME = "ubuntu";
-/** Public Bypass app on <droplet name>/<HEALTH_BYPASS_PATH> for every Deploy target. */
+/** Public Bypass app on <droplet name>/<HEALTH_BYPASS_PATH>: web.access `/healthcheck/: [everyone]`, the droplet's own name only. */
 export const HEALTH_APP_PREFIX = "infra-sync: healthcheck ";
 export const HEALTH_BYPASS_PATH = "healthcheck";
-/** Site apps: whole host (staff), protected path (public), exception path. */
+/**
+ * Site apps (web.access): the whole host ("/" needs anything but everyone), a path that needs a
+ * login (web-admin), a path open without one, to everyone, tokens or IPs (web-exception).
+ */
 export const WEB_APP_PREFIX = "infra-sync: web ";
 export const WEB_ADMIN_APP_PREFIX = "infra-sync: web-admin ";
 export const WEB_EXCEPTION_APP_PREFIX = "infra-sync: web-exception ";
@@ -41,31 +44,32 @@ export const VPC_TTL = 60;
 /** CNAME chains to a site hostname are followed this many hops (dependents, guard rail 1). */
 export const MAX_CNAME_CHAIN = 4;
 
-// ---------- DigitalOcean tags written from droplet files ----------
+// ---------- DigitalOcean tags (decision 20) ----------
 
-/** The Environment tag per environment. */
+/**
+ * The tool writes no DigitalOcean tags: the droplet file is the only source of truth. One
+ * exception until migration Phase 5: a droplet the tool creates gets the old firewall tag of its
+ * environment, so today's tag-attached firewalls cover it from birth (DigitalOcean's firewalls
+ * "production", "internal", "staging-network" and "SSH" are attached by these tags).
+ */
+export const FIREWALL_TAGS: Record<EnvName, string> = {
+  prod: "production",
+  staging: "staging",
+  internal: "internal",
+};
+
+/**
+ * The tags the infra-sync Worker read (src/export turns them into droplet files). Existing tags
+ * stay on the droplets; nothing writes or reads them after the switch-over.
+ */
 export const ENV_TAGS: Record<EnvName, string> = {
   prod: "env-prod",
   staging: "env-staging",
   internal: "env-internal",
 };
-/** Deploy target tag. */
 export const CI_DEPLOY_TAG = "ci-deploy";
-/** Web tags. */
 export const WEB_STAFF_TAG = "web-staff";
 export const WEB_PUBLIC_TAG = "web-public";
-/**
- * Every tag the tool manages on a droplet. Tags outside this list (e.g. the old firewall
- * tags) are left alone: never added, never removed.
- */
-export const MANAGED_TAGS: readonly string[] = [
-  ENV_TAGS.prod,
-  ENV_TAGS.staging,
-  ENV_TAGS.internal,
-  CI_DEPLOY_TAG,
-  WEB_STAFF_TAG,
-  WEB_PUBLIC_TAG,
-];
 
 // ---------- generated names ----------
 
@@ -79,10 +83,20 @@ export const RESERVED_PREFIXES: readonly string[] = [SSH_PREFIX, VPC_PREFIX];
 // ---------- web defaults (applied in core/desired.ts) ----------
 
 export const DEFAULT_WEB_ORIGIN = "https://{ip}:443";
+/** The Worker's protected paths of a web-public site when web-config.json set none (src/export). */
 export const DEFAULT_PROTECTED_PATHS: readonly string[] = ["/admin"];
-/** Health path when the file sets none: deploy targets serve /healthcheck/. */
+/** Health path when the file sets none: /healthcheck/ when web.access opens it to everyone, else /. */
 export const DEFAULT_HEALTH_PATH_DEPLOY = "/healthcheck/";
 export const DEFAULT_HEALTH_PATH = "/";
+
+// ---------- who-lists ----------
+
+/** Built-in who-list names: no group may take them. */
+export const WHO_STAFF = "staff";
+export const WHO_EVERYONE = "everyone";
+export const RESERVED_GROUP_NAMES: readonly string[] = [WHO_STAFF, WHO_EVERYONE];
+/** CI's service tokens are named ci-<something>: an ssh: token with this prefix wants /healthcheck/ open (src/checks). */
+export const CI_TOKEN_PREFIX = "ci-";
 
 /**
  * Placeholder for a value only known once a droplet exists (its IPs, its id). A plan for a

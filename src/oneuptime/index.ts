@@ -3,12 +3,11 @@
 // Endpoints, headers and the wire format live in ./api.ts; this file decides what to do.
 
 import { randomUUID } from "node:crypto";
-import { DNS_COMMENT_MARKER, HEALTH_BYPASS_PATH } from "../core/constants.js";
-import type { DesiredDroplet, DesiredMonitor, DesiredState } from "../core/desired.js";
+import { DNS_COMMENT_MARKER } from "../core/constants.js";
+import { accessFor, type DesiredDroplet, type DesiredMonitor, type DesiredState } from "../core/desired.js";
 import type { Diagnostic } from "../core/diagnostics.js";
 import { ApiError } from "../core/http.js";
 import type { ApplyResult, Json, ModulePlan, OpFailure, PlanOp, Provider, RunContext } from "../core/plan.js";
-import { normPath } from "../core/values.js";
 import {
   CRITERION,
   type CriterionRole,
@@ -165,26 +164,22 @@ const namesOf = (observed: OneUptimeObserved): Names => ({
 });
 
 /**
- * Why a monitor can't tell the app is down, as the Worker's healthWeak flag: through Access, a
- * staff site answers 302 to the login whatever its origin does, unless the path is bypassed (the
- * deploy target's /healthcheck on the droplet name, or an exception open to everyone). A public
- * site's protected paths need the login too (and are the tunnel's 404 on extra hostnames).
+ * Why a monitor can't tell the app is down, as the Worker's healthWeak flag: through Access, a path
+ * whose web.access rule needs a login answers 302 to the login whatever its origin does (and the
+ * tunnel's 404 on an extra hostname of a site open to everyone at "/"). A rule that lets a monitor
+ * through without a login (everyone; /healthcheck/ only on the droplet's own name) is fine; tokens
+ * and IP ranges are not the monitor's.
  */
 export function weakHealthReason(d: DesiredDroplet, m: DesiredMonitor): string | undefined {
   const web = d.web;
   if (!web || !web.hostnames.includes(m.hostname)) return undefined;
-  const hp = normPath(m.path);
-  const under = (p: string) => hp === normPath(p) || hp.startsWith(normPath(p) + "/");
-  if (web.exposure === "staff") {
-    const bypassed =
-      (d.deploy && m.hostname === d.name && under(`/${HEALTH_BYPASS_PATH}`)) || web.exceptions.some((e) => e.allow === "everyone" && under(e.path));
-    if (bypassed) return undefined;
-    return `${m.hostname} is a staff site and ${m.path} is not bypassed: the monitor only sees the staff login (302), so it stays up while the app is down`;
+  const rule = accessFor(web, m.path, m.hostname === d.name);
+  if (rule === "404") return `${m.path} needs a login on ${d.name}, so the tunnel answers 404 for it on ${m.hostname}: the monitor never sees the app`;
+  if (rule.everyone) return undefined;
+  if (rule.needsLogin) {
+    return `${m.path} on ${m.hostname} needs a login (web.access ${rule.path}): the monitor only sees the staff login (302), so it stays up while the app is down`;
   }
-  if (web.protectedPaths.some(under)) {
-    return `${m.path} is under a protected path of ${m.hostname}: the monitor only sees the staff login (302), or the tunnel's 404 on an extra hostname`;
-  }
-  return undefined;
+  return `${m.path} on ${m.hostname} is open only to service tokens or IP ranges (web.access ${rule.path}): the monitor is refused whatever the app does`;
 }
 
 const viewJson = (v: MonitorView): Json => v as unknown as Json;

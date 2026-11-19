@@ -8,36 +8,25 @@
 //   - YAML: one document per file, no duplicate keys;
 //   - the JSON Schema of each file kind;
 //   - rules inside one file the schema can't express: file name == name, ports, CIDRs,
-//     duplicate or clashing paths, reserved ssh-/vpc- prefixes, monitor hostnames, a
-//     profile's user_data file, account-internal references.
+//     who-list entries, web.access paths (the root "/" is required; no duplicates once
+//     lowercased and stripped of a trailing slash; no "*", "%" or "//"), reserved ssh-/vpc-
+//     prefixes, monitor hostnames, a profile's user_data file.
 //
 // What it does NOT check (cross-file and account-dependent rules belong to src/checks):
-// profile names exist, references to other droplets, service-token names, zones and
-// one-level names, a hostname claimed by two files, swarm rules, UDP only for staff.
+// profile names exist, references to other droplets, group and service-token names, email
+// domains, zones and one-level names, a hostname claimed by two files, swarm rules, UDP only
+// for staff, everyone/ip: in ssh.
 
 import { lstat, readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { LineCounter, parseAllDocuments, type Document } from "yaml";
-import { RESERVED_PREFIXES, DEFAULT_PROTECTED_PATHS } from "./constants.js";
+import { RESERVED_PREFIXES } from "./constants.js";
 import type { Diagnostic } from "./diagnostics.js";
 import { hasErrors } from "./diagnostics.js";
-import type {
-  AccountConfig,
-  AllowSpec,
-  DropletEntry,
-  DropletFile,
-  EnvName,
-  ExceptionAllow,
-  InfraConfig,
-  MonitorSpec,
-  Profile,
-  ProfileFile,
-  WebException,
-  WebSpec,
-} from "./model.js";
+import type { AccessRule, AccountConfig, AllowSpec, DropletEntry, DropletFile, EnvName, InfraConfig, MonitorSpec, Profile, ProfileFile, WebSpec } from "./model.js";
 import { ENV_NAMES } from "./model.js";
 import { dottedPath, validate, type SchemaKind } from "./schema.js";
-import { normPath, parseCidr, parsePort, parseWho, ValueError } from "./values.js";
+import { normPath, parseCidr, parsePort, parseWho, parseWhoEntry, ValueError } from "./values.js";
 
 export interface LoadResult {
   /** Present only when there are no error diagnostics. */
@@ -280,8 +269,8 @@ export function loadInfraFiles(files: InfraFiles): LoadResult {
 
 // ---------- account ----------
 
-type RawAccount = Omit<AccountConfig, "cloudflare" | "github" | "ssh_config" | "ssh_groups"> & {
-  ssh_groups?: Record<string, string[]>;
+type RawAccount = Omit<AccountConfig, "cloudflare" | "github" | "ssh_config" | "groups"> & {
+  groups?: Record<string, string[]>;
   cloudflare: Omit<AccountConfig["cloudflare"], "guards"> & { guards?: Partial<AccountConfig["cloudflare"]["guards"]> };
   github: { infra_repo: string; ssh_config_branch?: string; ssh_config_file?: string };
   ssh_config: { title: string; user?: string };
@@ -290,11 +279,6 @@ type RawAccount = Omit<AccountConfig, "cloudflare" | "github" | "ssh_config" | "
 function toAccount(raw: RawAccount, ctx: FileCtx): AccountConfig {
   const cf = raw.cloudflare;
   for (const env of ENV_NAMES) {
-    cf.ci_deploy_tokens[env].forEach((name, i) => {
-      if (!(name in cf.service_tokens)) {
-        ctx.err(["cloudflare", "ci_deploy_tokens", env, i], `service token "${name}" is not in cloudflare.service_tokens`, "unknown-service-token");
-      }
-    });
     const region = raw.digitalocean.regions[env];
     if (!(region in cf.tunnels)) {
       ctx.err(["digitalocean", "regions", env], `region "${region}" has no tunnel in cloudflare.tunnels`, "region-without-tunnel");
@@ -315,12 +299,12 @@ function toAccount(raw: RawAccount, ctx: FileCtx): AccountConfig {
       ssh_config_file: raw.github.ssh_config_file ?? "ssh_config",
     },
     ssh_config: { title: raw.ssh_config.title, user: raw.ssh_config.user ?? "ubuntu" },
-    ssh_email_domain: raw.ssh_email_domain.toLowerCase(),
-    // The domain of each email is checked in src/checks (with the droplet files' emails).
-    ssh_groups: Object.fromEntries(
-      Object.entries(raw.ssh_groups ?? {})
+    email_domain: raw.email_domain.toLowerCase(),
+    // The domain of each email, and the reserved names staff/everyone, are checked in src/checks.
+    groups: Object.fromEntries(
+      Object.entries(raw.groups ?? {})
         .sort(([a], [b]) => a.localeCompare(b))
-        // Lowercased, in file order (so a check can point at ssh_groups.<name>[i]); desired.ts deduplicates and sorts.
+        // Lowercased, in file order (so a check can point at groups.<name>[i]); desired.ts deduplicates and sorts.
         .map(([name, emails]) => [name, emails.map((e) => e.toLowerCase())]),
     ),
   };
@@ -333,15 +317,12 @@ interface RawDroplet {
   description?: string;
   profile?: string;
   env?: EnvName;
-  deploy?: boolean;
   frozen?: boolean;
   ssh: string[];
   web?: {
-    exposure: WebSpec["exposure"];
     origin?: string;
     hostnames?: string[];
-    protected_paths?: string[];
-    exceptions?: Array<{ path: string; allow: "everyone" | { ips?: string[]; service_tokens?: string[] } }>;
+    access: Record<string, string[]>;
     health_path?: string;
     health_accept_app_404?: boolean;
   };
@@ -375,50 +356,33 @@ function toWeb(raw: NonNullable<RawDroplet["web"]>, name: string, ctx: FileCtx):
     if (h === name) ctx.err(["web", "hostnames", i], `${h} is the droplet's own name; list only extra hostnames`);
   });
 
-  const protectedPaths = raw.protected_paths;
-  if (protectedPaths) {
-    const seen = new Set<string>();
-    protectedPaths.forEach((p, i) => {
-      const n = normPath(p);
-      if (n === "") ctx.err(["web", "protected_paths", i], `"${p}" protects the whole site; use exposure: staff instead`);
-      if (p.includes("//")) ctx.err(["web", "protected_paths", i], `"${p}" has an empty segment (//)`);
-      if (seen.has(n)) ctx.err(["web", "protected_paths", i], `duplicate path ${p}`);
-      seen.add(n);
-    });
+  const access: AccessRule[] = [];
+  const seen = new Map<string, string>();
+  for (const [path, who] of Object.entries(raw.access)) {
+    const at = ["web", "access", path];
+    const n = normPath(path);
+    if (path.includes("//")) ctx.err(at, `"${path}" has an empty segment (//)`, "web-access-path");
+    if (path.includes("*")) {
+      ctx.err(at, `"${path}": wildcards are not allowed (in Cloudflare Access a * changes what a path covers: /a/* does not cover /a); a path already covers everything under it`, "web-access-path");
+    }
+    if (path.includes("%")) {
+      ctx.err(at, `"${path}": percent-encoded characters are not allowed (Access compares the path as sent, without decoding it)`, "web-access-path");
+    }
+    const dup = seen.get(n);
+    if (dup !== undefined) {
+      ctx.err(at, `"${path}" is the same path as "${dup}" (paths are compared without case and without a trailing slash, as Access does)`, "web-access-duplicate");
+    } else seen.set(n, path);
+    who.forEach((w, j) => value(ctx, [...at, j], () => parseWhoEntry(w)));
+    access.push({ path, who: [...who] });
+  }
+  if (!seen.has("")) {
+    ctx.err(["web", "access"], 'web.access needs "/": who may reach the whole site (e.g. "/": [staff] for an internal tool, "/": [everyone] for a public site)', "web-access-root");
   }
 
-  const effectiveProtected = new Set(
-    raw.exposure === "public" ? (protectedPaths ?? DEFAULT_PROTECTED_PATHS).map(normPath) : [],
-  );
-  const exceptions: WebException[] = [];
-  const seenExc = new Set<string>();
-  (raw.exceptions ?? []).forEach((e, i) => {
-    const n = normPath(e.path);
-    if (n === "") ctx.err(["web", "exceptions", i, "path"], `"${e.path}" is the whole site; not an exception`);
-    if (e.path.includes("//")) ctx.err(["web", "exceptions", i, "path"], `"${e.path}" has an empty segment (//)`);
-    if (seenExc.has(n)) ctx.err(["web", "exceptions", i, "path"], `duplicate exception path ${e.path}`);
-    seenExc.add(n);
-    if (effectiveProtected.has(n)) ctx.err(["web", "exceptions", i, "path"], `${e.path} is both a protected path and an exception`);
-    let allow: ExceptionAllow;
-    if (e.allow === "everyone") allow = "everyone";
-    else {
-      const a: { ips?: string[]; service_tokens?: string[] } = {};
-      if (e.allow.ips) {
-        const ips = e.allow.ips.map((ip, j) => value(ctx, ["web", "exceptions", i, "allow", "ips", j], () => parseCidr(ip)));
-        a.ips = [...new Set(ips.filter((x): x is string => x !== undefined))].sort();
-      }
-      if (e.allow.service_tokens) a.service_tokens = [...e.allow.service_tokens].sort();
-      allow = a;
-    }
-    exceptions.push({ path: e.path, allow });
-  });
-
   return {
-    exposure: raw.exposure,
     ...(raw.origin !== undefined ? { origin: raw.origin } : {}),
     hostnames: [...hostnames],
-    ...(protectedPaths ? { protected_paths: [...protectedPaths] } : {}),
-    exceptions,
+    access,
     ...(raw.health_path !== undefined ? { health_path: raw.health_path } : {}),
     health_accept_app_404: raw.health_accept_app_404 ?? false,
   };
@@ -450,6 +414,7 @@ function toAllow(raw: RawDroplet["allow"], name: string, ctx: FileCtx): AllowSpe
 
 function toDroplet(raw: RawDroplet, ctx: FileCtx): DropletFile {
   const web = raw.web ? toWeb(raw.web, raw.name, ctx) : undefined;
+  raw.ssh.forEach((w, i) => value(ctx, ["ssh", i], () => parseWhoEntry(w)));
 
   let monitors: MonitorSpec[] | undefined;
   if (raw.monitors) {
@@ -472,7 +437,6 @@ function toDroplet(raw: RawDroplet, ctx: FileCtx): DropletFile {
     ...(raw.description !== undefined ? { description: raw.description } : {}),
     ...(raw.profile !== undefined ? { profile: raw.profile } : {}),
     ...(raw.env !== undefined ? { env: raw.env } : {}),
-    deploy: raw.deploy ?? false,
     frozen: raw.frozen ?? false,
     ssh: [...raw.ssh],
     ...(web ? { web } : {}),
@@ -482,4 +446,17 @@ function toDroplet(raw: RawDroplet, ctx: FileCtx): DropletFile {
       ? { swarm: { cluster: raw.swarm.cluster, role: raw.swarm.role ?? "worker", encrypted_overlay: raw.swarm.encrypted_overlay ?? false } }
       : {}),
   };
+}
+
+/**
+ * One droplet file given as data (e.g. built by src/export) -> DropletFile, with the same schema
+ * and single-file rules as a file on disk (no line numbers). For code that builds droplet files.
+ */
+export function dropletFromData(data: unknown, source = "droplets/(in memory).yaml"): { file?: DropletFile; diagnostics: Diagnostic[] } {
+  const diagnostics: Diagnostic[] = [];
+  const name = (data as { name?: unknown } | null)?.name;
+  const ctx = new FileCtx(source, diagnostics, undefined, typeof name === "string" ? name : undefined);
+  if (!schemaCheck("droplet", ctx, data)) return { diagnostics };
+  const file = toDroplet(data as RawDroplet, ctx);
+  return hasErrors(diagnostics) ? { diagnostics } : { file, diagnostics };
 }

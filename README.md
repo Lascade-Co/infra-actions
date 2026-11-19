@@ -44,7 +44,7 @@ DigitalOcean droplets ──observe──▶ desired state (files ⨝ droplets, 
 - **`check`:** read-only. Runs the checks, observes every API and plans. Its `--out` file is the PR comment, "What happens when this is merged": counts per provider, errors, warnings (awaiting cutover, held droplets and routes the tool doesn't build each have their own heading), the changes grouped by droplet, then the report-only items (the firewall report collapsed per droplet, frozen droplets). `--base` is a checkout of the PR's base: with it, the check also compares the two (a removed droplet file whose droplet still exists is an error, decision 15).
 - **`apply`:** all-or-nothing (decision 16).
   1. Runs everything `check` runs. If any check, read or plan has an error, it writes nothing.
-  2. Creates droplets from their profiles and writes their managed tags (create-only: it never resizes, rebuilds or deletes one).
+  2. Creates droplets from their profiles, each with the old firewall tag of its `env` (create-only: it never resizes, rebuilds or deletes one, and never writes a tag on an existing droplet; decision 20).
   3. Waits for the new droplets' IPs, then plans again. The new plan must be as clean as the first, or nothing else is applied.
   4. Applies Cloudflare, firewall (report-only), OneUptime and the ssh config, in that order. The first module that fails stops the run; the ones after it are skipped and the summary lists them as not applied.
   5. Sends the Telegram summary, also when apply was blocked or stopped.
@@ -59,7 +59,18 @@ DigitalOcean droplets ──observe──▶ desired state (files ⨝ droplets, 
     [--drafts <allow/swarm drafts.yaml>] [--frozen <name,...>] [--include-untagged] --out <notes.md>
   ```
 
-  Each file gets `env` from the `env-*` tag, `deploy` from `ci-deploy`, `web:` from `web-staff`/`web-public` plus the site's `web-config.json` entry, and `ssh: [admins]` (the group holding `SSH_ADMIN_EMAILS`). Anything that can't be written without changing a tag (a `web-config.json` entry on a droplet with no web tag, both web tags, `ci-deploy` without `env`) is left out and listed in the notes, and so is any draft `allow:`/`swarm:` entry the schema or the checks reject. All inputs and outputs hold real data: keep them out of this repo.
+  Each file gets `env` from the `env-*` tag and `ssh: [admins]` (the group holding `SSH_ADMIN_EMAILS`), and [`src/export/convert.ts`](src/export/convert.ts) writes the rest so that the plan shows no web change:
+
+  | The Worker's | becomes |
+  |---|---|
+  | `web-staff` | `web.access`: `"/": [staff]` |
+  | `web-public` | `"/": [everyone]`, plus each protected path (default `/admin`) as `[staff]` |
+  | exception `allow: everyone` | `"<path>": [everyone]` |
+  | exception `allow: {ips, service_tokens}` | `"<path>": [ip:<cidr>, ..., token:<name>, ...]` |
+  | `ci-deploy` (env `E`) | `token:<E's CI token>` in `ssh:`, and `"/healthcheck/": [everyone]` when the droplet has a site |
+  | `SSH_ADMIN_EMAILS` | `account.yaml` `groups.admins` |
+
+  Paths keep `web-config.json`'s spelling (the existing Access apps' names embed them). A `ci-deploy` droplet without a site keeps the healthcheck bypass it has (the planner holds it; it does nothing without an Access app on its host). A `web-config.json` entry on a droplet with no web tag, or both web tags, is left out and listed in the notes, and so is any draft `allow:`/`swarm:` entry the schema or the checks reject. All inputs and outputs hold real data: keep them out of this repo.
 - **Load failures:** when `apply` or `drift` can't load the infra data (bad YAML, a file failing the schema, `account.yaml` missing), the run fails before any API call and posts one short Telegram message: the run, the short commit and the number of errors per code (`schema 2, layout 1`), never file or droplet names. The chat id is read leniently from `account.yaml` (any file that parses and has `telegram.chat_id`), else from `TELEGRAM_CHAT_ID` in the environment; with neither, the message is skipped.
 
 Options for every command: `--out <file>` (the detail report, markdown), `--json <file>` (the whole report as JSON, including provider ids and the rendered ssh config) and `--commit <sha>` (the `infra` commit the run is pinned to). Nothing is written unless a path is given. `--notify <apply|drift>` is for `validate` only (above).
@@ -71,7 +82,7 @@ The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops
 | Variable | Used by | For |
 |---|---|---|
 | `CF_API_TOKEN` | cloudflare | DNS, tunnels, Access apps, SSH targets |
-| `DO_TOKEN` | droplets, firewall | droplets and tags (write), firewalls (read) |
+| `DO_TOKEN` | droplets, firewall | droplets (create, read), tags (read, and `tag:create`: a new droplet is created with its env's firewall tag), firewalls (read) |
 | `INFRA_GH_TOKEN` | sshconfig, drift | the ssh-config branch of the `infra` repo; its expiry is in the drift report |
 | `ONEUPTIME_API_KEY` | oneuptime | monitors (when `account.yaml` has a `oneuptime` section) |
 | `ONEUP_ACCESS_CLIENT_ID`, `ONEUP_ACCESS_CLIENT_SECRET` | oneuptime | the Cloudflare Access service token in front of OneUptime |
@@ -84,8 +95,8 @@ The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops
 
 | Module | What it manages | Notes |
 |---|---|---|
-| `checks` (B2) | rules beyond the schema: names in an account zone, references between files, service tokens, SSH groups and email domain, UDP routes, swarm rules, removed files | pure; errors block check and apply |
-| `droplets` (B4) | creates droplets from profiles; writes the managed tags (`env-*`, `ci-deploy`, `web-staff`, `web-public`) | create-only; other tags never touched |
+| `checks` (B2) | rules beyond the schema: names in an account zone, references between files, who-lists (groups, service tokens, email domain, web-only entries), UDP routes, swarm rules, removed files | pure; errors block check and apply |
+| `droplets` (B4) | creates droplets from profiles, with the env's old firewall tag | create-only; never writes a tag on an existing droplet (decision 20) |
 | `cloudflare` (B1) | SSH targets and one SSH Access app per access set, private (`vpc-`) names, sites (DNS, tunnel routes, Access apps), `allow.tunnel` routes | port of the Worker's reconcile; delete guard rails; UDP routes and port ranges are reported, not built |
 | `firewall` (B3) | what `allow:` and `swarm:` imply for the DigitalOcean firewalls | report-only until migration Phase 5 |
 | `oneuptime` (B5) | one HTTP monitor per site hostname (or per `monitors:` entry) | down only after 3 failing minutes; owned monitors are never deleted, only reported |
@@ -106,24 +117,20 @@ There's one file per droplet: `droplets/<droplet name>.yaml`. The name is the do
 name: shop.example.com          # = file name; ssh-shop.example.com and vpc-shop.example.com are derived
 description: Storefront
 profile: ubuntu-6               # only for droplets the tool creates; adopted droplets have none
-env: prod                       # prod | staging | internal -> tag env-<env>; new droplets go to that env's region
-deploy: true                    # Deploy target (tag ci-deploy): CI may SSH in with the env's deploy token
+env: prod                       # prod | staging | internal: the region (and firewall tag) of a droplet the tool creates
 frozen: false                   # true: plans show its changes, apply skips them (except SSH access, below)
-ssh: [admins, someone@example.com]  # required: who may SSH in, always as ubuntu (groups from account.yaml, emails)
+ssh: [admins, someone@example.com, token:ci-prod]  # required who-list: who may SSH in, always as ubuntu
 
 web:                            # the site, through the tunnel (replaces web-staff/web-public + web-config.json)
-  exposure: public              # staff (login everywhere) | public (login on protected paths)
   origin: http://{ip}:80        # default https://{ip}:443 (certificate not checked)
-  hostnames: [shop.example.net] # extra one-level hostnames
-  protected_paths: [/admin]     # public only; default [/admin]
-  exceptions:                   # paths open to more callers
-    - path: /webhooks/payments
-      allow: everyone
-    - path: /api/partner
-      allow:
-        ips: [198.51.100.0/24]
-        service_tokens: [uptime]   # names from account.yaml cloudflare.service_tokens
-  health_path: /healthcheck/    # default /healthcheck/ with deploy, else /
+  hostnames: [shop.example.net] # extra one-level hostnames; they get the same rules (see below)
+  access:                       # path -> who-list; "/" is required
+    /: [everyone]               # public site: no login on the site itself
+    /admin: [staff]             # needs the staff login (404 on shop.example.net)
+    /webhooks/payments: [everyone]
+    /api/partner: [ip:198.51.100.0/24, token:uptime]
+    /healthcheck/: [everyone]   # CI's post-deploy check, on shop.example.com only
+  health_path: /healthcheck/    # default /healthcheck/ when web.access opens it to everyone, else /
   health_accept_app_404: false
 
 monitors:                       # leave out: one HTTP monitor per site hostname; [] for none
@@ -149,17 +156,88 @@ swarm:                          # Docker Swarm membership; the tool derives the 
   encrypted_overlay: false      # members must agree
 ```
 
-Only `name` and `ssh` are required. A minimal adopted droplet is `name: build.example.com` and `ssh: [admins]`, with `env` if it has one.
+Only `name` and `ssh` are required. A minimal adopted droplet is `name: build.example.com` and `ssh: [admins]`. `env` matters only for a droplet the tool creates (its region, and the old firewall tag `production` / `staging` / `internal` it is created with). The tool writes no DigitalOcean tags otherwise (decision 20): existing tags stay as they are.
+
+### Who-lists
+
+`ssh:` and each `web.access` path take the same kind of list:
+
+| Entry | Who | In `ssh:` | In `web.access` |
+|---|---|---|---|
+| `admins` (a group) | the emails of `account.yaml` `groups.admins` | yes | yes: one Allow policy with the people |
+| `someone@example.com` | that person (must be in `account.yaml` `email_domain`) | yes | yes: in the same Allow policy |
+| `staff` | anyone with a staff login | yes: every address in `email_domain` | yes: the reusable "staff" Access policy (WARP sign-in kept) |
+| `everyone` | anyone, no login | **no** (error) | yes: no app on `/`, a Bypass app on any other path; must stand alone |
+| `token:<name>` | a machine with that Access service token (`account.yaml` `cloudflare.service_tokens`) | yes: Service Auth on the droplet's `ssh-` route (it still logs in with its own key); never in the infrastructure app | yes: Service Auth |
+| `ip:<address or CIDR>` | callers from that range | **no** (error) | yes: a Bypass for that range |
+
+A group can't be named `staff` or `everyone`. The checks fail on an unknown group or token, an email outside `email_domain`, an empty list, `everyone` with other entries, and `everyone` or `ip:` in `ssh:`.
+
+### Web access rules
+
+`web.access` maps a path to who may reach it (decision 19). A path covers everything under it and the most specific path wins; `/` is required. Each path is one Access app on each hostname:
+
+- `"/"`: `[everyone]` means no app (a public site); anything else is the whole-site app `infra-sync: web <host>`;
+- a path whose list has a person (`staff`, a group, an email) is `infra-sync: web-admin <host><path>`, and it needs a login;
+- a path open without one (`everyone`, `token:`, `ip:`) is `infra-sync: web-exception <host><path>`.
+
+A list that mixes them is one app with up to four policies, in this order: Bypass for the IP ranges, Service Auth for the tokens, the reusable staff policy, one Allow policy for the groups' and emails' people. People get in on their Cloudflare One (WARP) session when the list has a person. The apps open without a login are created before the ones that keep people out, so a webhook never gets the login in between; under `"/": [everyone]`, a token or IP path keeps everyone else out and is created with them.
+
+**Extra hostnames** (`web.hostnames`) get the same rules, with two exceptions. On a site whose `/` is `[everyone]`, a path that needs a login answers **404** in the tunnel on the extra hostnames (no Access app, so a brand domain never shows the staff login page), a list that mixes people and tokens included. And `/healthcheck/: [everyone]` (CI's post-deploy check) is the bypass app `infra-sync: healthcheck <droplet>` on the droplet's own name only. Paths open to `everyone`, `token:` or `ip:` work on every hostname.
+
+**How Cloudflare matches paths.** [Cloudflare's documentation](https://developers.cloudflare.com/cloudflare-one/access-controls/policies/app-paths/) says only this much: an app covers the paths under its own ("If no separate, specific rule is set for `dashboard.com/eng/exec`, it will inherit any rules set for `dashboard.com/eng`"); the more specific app wins; a `*` in a path changes what it covers (`example.com/alpha/*` covers `/alpha/one` but not `/alpha`); query strings and `#` are not supported. It does not say whether `/admin` also matches `/administrator`, nor how case and a trailing slash are compared. Requests to live sites (2026-11-19, read-only) showed:
+
+- an app on `host/admin` covers `/admin`, `/admin/` and `/admin/x`, and **not** `/administrator` or `/adminfoo` (whole path segments, as this tool assumes everywhere);
+- it covers `/ADMIN` and `/Admin/x` too: Access compares paths without case. The tool compares them the same way, so `/Admin` and `/admin/` are the same path (an error if both are listed);
+- a percent-encoded slash (`/admin%2Fx`) is **not** covered: it reaches the origin, which may decode it as `/admin/x`. Nothing in Access can match it; an app must not rely on Access alone for such paths.
+
+So the loader rejects what would make a rule mean something else: `*` (a wildcard), `%` (Access doesn't decode), `//`, and two spellings of one path. The tunnel's 404 rule on extra hostnames is a regular expression on the path as written (`^/admin(/.*)?$`), and cloudflared matches it with case, so on an extra hostname `/ADMIN` would reach the origin (inferred from the regex, not observed: the probe could not tell the tunnel's 404 from the origin's). A path open without a login under a path that answers 404 there is 404 there too (a warning).
+
+**For staff: common changes.**
+
+```yaml
+# An internal tool: only staff, with a webhook open to its sender.
+web:
+  access:
+    /: [staff]
+    /webhooks: [everyone]
+```
+
+```yaml
+# Only one team, plus the uptime monitor's service token.
+web:
+  access:
+    /: [shop-team, token:uptime]
+```
+
+```yaml
+# A public site with an admin area for two people.
+web:
+  access:
+    /: [everyone]
+    /admin: [alice@example.com, bob@example.com]
+```
+
+```yaml
+# CI deploys to it (production): its token in ssh, its check after a deploy.
+ssh: [admins, token:ci-prod]
+web:
+  access:
+    /: [staff]
+    /healthcheck/: [everyone]
+```
+
+The check warns when `ssh:` has a token whose name starts with `ci-` and the site's `web.access` has no `/healthcheck/`.
 
 ### SSH access
 
-`ssh:` is the droplet's SSH access list (decision 18): at least one entry, each a group name from `account.yaml` `ssh_groups` or an email address in `account.yaml` `ssh_email_domain`. People on the list log in as `ubuntu` only. Root is reached only through the DigitalOcean web console. The checks fail (and block the apply) on a missing or empty list, an unknown group, an empty group, or an email outside `ssh_email_domain`, in a droplet file or in a group.
+`ssh:` is the droplet's SSH access list (decision 18), a who-list (above): at least one entry. People on the list log in as `ubuntu` only. Root is reached only through the DigitalOcean web console. The checks fail (and block the apply) on a missing or empty list, an unknown group or token, an empty group, an email outside `email_domain` (in a droplet file or in a group), and `everyone` or `ip:`.
 
-In Cloudflare, the droplets that resolve to the same people (groups expanded, emails lowercased, sorted, deduplicated) share one Access for Infrastructure app, `infra-sync: SSH <set id>`. Each droplet's infrastructure target carries the tag `ssh-access: <set id>`, and its app selects port 22 of the targets with that tag. The set id is the first 12 hex digits of the SHA-256 of the sorted email list. The droplet's `ssh-` route app lets in the same people. The PR comment shows, per droplet, who gains and who loses SSH, and says once when root login goes away.
+In Cloudflare, the droplets that resolve to the same people (groups expanded, emails lowercased, sorted, deduplicated; `staff` as every address in `email_domain`) share one Access for Infrastructure app, `infra-sync: SSH <set id>`. Each droplet's infrastructure target carries the tag `ssh-access: <set id>`, and its app selects port 22 of the targets with that tag. The set id is the first 12 hex digits of the SHA-256 of the sorted email list (plus `@<domain>` for `staff`). The droplet's `ssh-` route app lets in the same people, and its `token:` entries (Service Auth, policy `infra-sync: ci-deploy (<env>)`, the Worker's name). Tokens never go into the infrastructure app: a service token can't get a short-lived certificate. The PR comment shows, per droplet, who gains and who loses SSH, and says once when root login goes away.
 
 This replaces the Worker's single app (`infra-sync: SSH targets`: every admin on every droplet, as `ubuntu` or `root`). The tool owns it by its name prefix and deletes it once every target it covers carries a wanted set's tag. The apply creates the set apps first, then retags the targets (each retag waits for its set's app), then deletes the apps no set wants. A droplet that isn't managed this run (no file, held) keeps the app it relies on, with a warning.
 
-**Frozen droplets** are the one exception to `frozen`: their SSH access is applied. Only two things change for a frozen droplet: the `ssh-access` tag on its existing infrastructure target (which set's app covers it), and the people on its existing `ssh-` app (the include list of that app's Allow policy for people; its other policies stay as they are). Everything else about a frozen droplet stays plan-only: a new IP or name on its target, its `ssh-` app's CI tokens, DNS, tunnel routes, site and healthcheck apps, DigitalOcean tags, monitors and firewall. Nothing is created for it either: a frozen droplet with no target yet gets none until it is unfrozen. The PR comment marks the applied ones "frozen: only SSH access changes are applied"; the rest shows as "frozen droplet, would …" (the target's and `ssh-` app's other changes as separate items, keyed `… (beyond SSH access)`). So the Worker's single app goes once every droplet, frozen ones included, carries its set's tag.
+**Frozen droplets** are the one exception to `frozen`: their SSH access is applied. Only two things change for a frozen droplet: the `ssh-access` tag on its existing infrastructure target (which set's app covers it), and the people on its existing `ssh-` app (the include list of that app's Allow policy for people; its other policies stay as they are). Everything else about a frozen droplet stays plan-only: a new IP or name on its target, its `ssh-` app's CI tokens, DNS, tunnel routes, site and healthcheck apps, monitors and firewall. Nothing is created for it either: a frozen droplet with no target yet gets none until it is unfrozen. The PR comment marks the applied ones "frozen: only SSH access changes are applied"; the rest shows as "frozen droplet, would …" (the target's and `ssh-` app's other changes as separate items, keyed `… (beyond SSH access)`). So the Worker's single app goes once every droplet, frozen ones included, carries its set's tag.
 
 ### Profiles and account config
 
@@ -168,20 +246,19 @@ This replaces the Worker's single app (`infra-sync: SSH targets`: every admin on
   - the Cloudflare account id, team domain and zones;
   - the tunnel per region;
   - the staff policy id;
-  - the service tokens by name;
-  - the CI deploy tokens per env;
+  - the service tokens by name (every `token:<name>` a who-list may use, CI's included);
   - the delete guard rails;
   - the region per env;
   - the OneUptime project;
   - the `infra` repo and its ssh-config branch;
   - the Telegram chat;
   - the ssh config title;
-  - `ssh_email_domain`, the only email domain allowed in SSH lists (e.g. `example.com`);
-  - `ssh_groups`, the SSH groups by name, each a non-empty list of emails in that domain:
+  - `email_domain`, the only email domain allowed in who-lists (e.g. `example.com`);
+  - `groups`, by name, each a non-empty list of emails in that domain (not named `staff` or `everyone`), for `ssh:` and `web.access`:
 
     ```
-    ssh_email_domain: example.com
-    ssh_groups:
+    email_domain: example.com
+    groups:
       admins: [admin@example.com, ops@example.com]
       shop-team: [dev@example.com]
     ```
@@ -257,7 +334,7 @@ src/core/            model types, loader, schema validation, desired state, plan
 src/cloudflare/      B1  Cloudflare reconcile (port of the Worker)
 src/checks/          B2  cross-file and account checks
 src/firewall/        B3  DigitalOcean firewall plan (report-only)
-src/droplets/        B4  droplet creation (create-only) and tags
+src/droplets/        B4  droplet creation (create-only, with the env's firewall tag)
 src/oneuptime/       B5  OneUptime monitors
 src/sshconfig/       B6  ssh config on the ssh-config branch
 src/output/          B7  PR comment, log line, Telegram, drift report, load-failure alert
@@ -282,7 +359,7 @@ A plan is a list of ops:
 {
   provider: "cloudflare",            // digitalocean | cloudflare | oneuptime | github
   module: "cloudflare",              // which module produced it
-  kind: "dns-record",                // droplet | droplet-tags | firewall | firewall-rule | infra-target | infra-app
+  kind: "dns-record",                // droplet | firewall | firewall-rule | infra-target | infra-app
                                      // | access-app | tunnel-ingress | dns-record | monitor | ssh-config
   key: "A vpc-shop.example.com",     // stable per kind (conventions in src/core/plan.ts)
   action: "create",                  // create | update | delete | report (shown, never applied)

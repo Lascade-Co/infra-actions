@@ -1,23 +1,21 @@
 # An adopted droplet (it existed before the repo; no profile): a public site with a brand
-# hostname, a webhook open to everyone, and an API path open to a partner's addresses and
-# a service token.
+# hostname, two paths behind the staff login, a webhook open to everyone, and an API path open to a
+# partner's addresses and a service token. CI deploys over SSH with its token and checks
+# /healthcheck/ afterwards.
 name: shop.example.com
 description: Storefront (example)
 env: prod
-deploy: true
-ssh: [admins, shop-team]   # groups from account.yaml ssh_groups
+ssh: [admins, shop-team, token:ci-prod]   # groups from account.yaml groups, CI's service token
 web:
-  exposure: public
   origin: http://{ip}:80
   hostnames: [shop.example.net]
-  protected_paths: [/admin, /internal]
-  exceptions:
-    - path: /webhooks/payments
-      allow: everyone
-    - path: /api/partner
-      allow:
-        ips: [198.51.100.0/24, 203.0.113.9]
-        service_tokens: [uptime]
+  access:
+    /: [everyone]                    # public: no login on the site itself
+    /admin: [staff]                  # 404 on shop.example.net (brand domains never show the login)
+    /internal: [staff]
+    /webhooks/payments: [everyone]
+    /api/partner: [ip:198.51.100.0/24, ip:203.0.113.9, token:uptime]
+    /healthcheck/: [everyone]        # CI's post-deploy check, on shop.example.com only
   health_path: /healthcheck/
 allow:
   droplet:

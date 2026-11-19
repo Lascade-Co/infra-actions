@@ -9,16 +9,13 @@ cloudflare:
     nyc1: 00000000-0000-4000-8000-000000000001
     blr1: 00000000-0000-4000-8000-000000000002
   staff_policy_id: 00000000-0000-4000-8000-000000000010
+  # Every service token a who-list may name as token:<name> (CI's included). Names, not secrets.
   service_tokens:
     ci-prod: 00000000-0000-4000-8000-000000000101
     ci-staging: 00000000-0000-4000-8000-000000000102
     ci-internal: 00000000-0000-4000-8000-000000000103
     etl: 00000000-0000-4000-8000-000000000104
     uptime: 00000000-0000-4000-8000-000000000105
-  ci_deploy_tokens:
-    prod: [ci-prod]
-    staging: [ci-staging]
-    internal: [ci-internal]
   guards:
     max_deletes: 20
     max_delete_fraction: 0.3
@@ -47,10 +44,11 @@ ssh_config:
   title: Example Co droplets
   user: ubuntu
 
-# Who may SSH (decision 18). A droplet file's `ssh:` names these groups and/or single emails;
-# every email must be in ssh_email_domain. Login is always as ubuntu.
-ssh_email_domain: example.com
-ssh_groups:
+# Who-lists (`ssh:` and `web.access` in droplet files) name these groups, single emails, staff,
+# everyone (web only), token:<name> and ip:<cidr> (web only). Every email must be in email_domain.
+# A group can't be named staff or everyone. SSH login is always as ubuntu.
+email_domain: example.com
+groups:
   admins:
     - admin@example.com
     - ops@example.com

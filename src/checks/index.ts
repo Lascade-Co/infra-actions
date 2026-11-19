@@ -4,12 +4,14 @@
 // cross-file and account-dependent ones. All functions are pure and return diagnostics
 // (code + file + path + droplet), never throw for a rule violation.
 
-import type { DesiredDroplet, DesiredState } from "../core/desired.js";
+import { CI_TOKEN_PREFIX, HEALTH_BYPASS_PATH, RESERVED_GROUP_NAMES } from "../core/constants.js";
+import { desiredWeb, pathUnder, type DesiredDroplet, type DesiredState } from "../core/desired.js";
 import type { Diagnostic, Level } from "../core/diagnostics.js";
 import { ACCOUNT_FILE, DROPLETS_DIR } from "../core/loader.js";
-import type { DropletEntry, DropletFile, InfraConfig } from "../core/model.js";
+import type { DropletEntry, DropletFile, InfraConfig, WhoEntry } from "../core/model.js";
 import { flattenName, isOneLevel } from "../core/naming.js";
-import { formatPort, formatWho } from "../core/values.js";
+import { dottedPath } from "../core/schema.js";
+import { formatPort, formatWho, normPath, parseWhoEntry, ValueError } from "../core/values.js";
 
 const fileOf = (name: string): string => `${DROPLETS_DIR}/${name}.yaml`;
 
@@ -34,13 +36,17 @@ const listNames = (names: readonly string[]): string => names.join(", ");
  *  - site hostnames and tunnel routes are One-level names in an account zone; no hostname
  *    claimed by two files (or equal to another droplet's name);
  *  - references: profile exists; allow.droplet.from names a droplet file; service-token
- *    names (who, exception allow.service_tokens) exist in account.cloudflare.service_tokens;
- *  - deploy needs a ci_deploy_tokens entry for its env (warning, as the Worker);
+ *    names (allow.tunnel who) exist in account.cloudflare.service_tokens;
  *  - allow.tunnel: /udp only with who: [staff] (reason in the message);
  *  - swarm: at least one manager per cluster; members agree on encrypted_overlay;
- *  - SSH access (decision 18): every ssh entry is a group in account.yaml ssh_groups or an email
- *    in ssh_email_domain; every email in ssh_groups is in that domain; no empty list or group
- *    (the schema already rejects those; checked again for configs built in code).
+ *  - who-lists (ssh: and web.access, decisions 18 and 19): every group is in account.yaml groups,
+ *    every token in cloudflare.service_tokens, every email (also in groups) in email_domain; no
+ *    empty list or group (the schema rejects those first; checked again for configs built in
+ *    code); everyone stands alone; everyone and ip: are web only; no group is named staff or
+ *    everyone;
+ *  - web.access: an ssh: token named ci-* (CI deploys) with no /healthcheck/ in web.access
+ *    (warning: CI's post-deploy check would get the login); a path open without a login under one
+ *    that answers 404 on the extra hostnames (warning).
  */
 export function checkConfig(config: InfraConfig): Diagnostic[] {
   const out: Diagnostic[] = [];
@@ -156,36 +162,6 @@ export function checkConfig(config: InfraConfig): Diagnostic[] {
         }
       });
     });
-    spec.web?.exceptions.forEach((x, i) => {
-      if (x.allow === "everyone") return;
-      for (const name of x.allow.service_tokens ?? []) {
-        if (!(name in tokens)) {
-          out.push(
-            diag(
-              "error",
-              "unknown-service-token",
-              e,
-              `web.exceptions[${i}].allow.service_tokens`,
-              `service token "${name}" is not in account.yaml cloudflare.service_tokens (${tokenHint})`,
-            ),
-          );
-        }
-      }
-    });
-
-    // ---------- deploy ----------
-    if (spec.deploy && spec.env && account.cloudflare.ci_deploy_tokens[spec.env].length === 0) {
-      out.push(
-        diag(
-          "warning",
-          "no-deploy-token",
-          e,
-          "deploy",
-          `deploy: true, but account.yaml cloudflare.ci_deploy_tokens.${spec.env} is empty, so no CI token may SSH into this droplet`,
-        ),
-      );
-    }
-
     // ---------- tunnel UDP ----------
     spec.allow.tunnel.forEach((t, i) => {
       if (t.port.protocol !== "udp") return;
@@ -203,8 +179,8 @@ export function checkConfig(config: InfraConfig): Diagnostic[] {
     });
   }
 
-  // ---------- SSH access ----------
-  out.push(...checkSsh(config));
+  // ---------- who-lists (ssh:, web.access) ----------
+  out.push(...checkWho(config));
 
   // ---------- swarm ----------
   for (const [cluster, members] of swarmClusters(config.droplets.map((e) => ({ entry: e, spec: e.file })))) {
@@ -237,41 +213,129 @@ export function checkConfig(config: InfraConfig): Diagnostic[] {
 /** The part after the last @, lowercase. */
 const domainOf = (email: string): string => email.slice(email.lastIndexOf("@") + 1).toLowerCase();
 
-function checkSsh(config: InfraConfig): Diagnostic[] {
+function checkWho(config: InfraConfig): Diagnostic[] {
   const out: Diagnostic[] = [];
   const { account } = config;
-  const domain = account.ssh_email_domain.toLowerCase();
-  const groups = account.ssh_groups;
+  const domain = account.email_domain.toLowerCase();
+  const groups = account.groups;
   const known = Object.keys(groups).sort();
-  const groupHint = known.length ? `known: ${listNames(known)}` : "account.yaml has no ssh_groups";
-  const outside = (email: string) =>
-    `${email} is not an @${domain} address: only ${domain} addresses (account.yaml ssh_email_domain) may SSH into droplets`;
+  const groupHint = known.length ? `known: ${listNames(known)}` : "account.yaml has no groups";
+  const tokens = account.cloudflare.service_tokens;
+  const knownTokens = Object.keys(tokens).sort();
+  const tokenHint = knownTokens.length ? `known: ${listNames(knownTokens)}` : "account.yaml lists none";
+  const outside = (email: string) => `${email} is not an @${domain} address: only ${domain} addresses (account.yaml email_domain) may be listed`;
 
   for (const name of known) {
     const emails = groups[name]!;
+    if (RESERVED_GROUP_NAMES.includes(name)) {
+      out.push({
+        level: "error",
+        code: "group-reserved-name",
+        file: ACCOUNT_FILE,
+        path: `groups.${name}`,
+        message: `a group can't be named "${name}": it is a built-in who-list entry (${RESERVED_GROUP_NAMES.join(", ")})`,
+      });
+    }
     if (!emails.length) {
-      out.push({ level: "error", code: "ssh-group-empty", file: ACCOUNT_FILE, path: `ssh_groups.${name}`, message: `SSH group "${name}" lists no one; list at least one email or remove the group` });
+      out.push({ level: "error", code: "group-empty", file: ACCOUNT_FILE, path: `groups.${name}`, message: `group "${name}" lists no one; list at least one email or remove the group` });
     }
     emails.forEach((e, i) => {
-      if (domainOf(e) !== domain) {
-        out.push({ level: "error", code: "ssh-email-domain", file: ACCOUNT_FILE, path: `ssh_groups.${name}[${i}]`, message: outside(e) });
-      }
+      if (domainOf(e) !== domain) out.push({ level: "error", code: "email-domain", file: ACCOUNT_FILE, path: `groups.${name}[${i}]`, message: outside(e) });
     });
   }
 
-  for (const e of config.droplets) {
-    const ssh = e.file.ssh ?? [];
-    if (!ssh.length) {
-      out.push(diag("error", "ssh-missing", e, "ssh", "ssh lists no one: every droplet needs at least one group or email allowed to SSH in as ubuntu"));
+  /** Checks one who-list; `where` is "ssh" or "web" (everyone and ip: are web only). */
+  const checkList = (e: DropletEntry, list: readonly string[], segs: Array<string | number>, where: "ssh" | "web") => {
+    const path = dottedPath(segs);
+    if (!list.length) {
+      out.push(
+        diag(
+          "error",
+          where === "ssh" ? "ssh-missing" : "who-list-empty",
+          e,
+          path,
+          where === "ssh" ? "ssh lists no one: every droplet needs at least one group, email or staff allowed to SSH in as ubuntu" : "the who-list is empty: list who may reach this path",
+        ),
+      );
+      return;
     }
-    ssh.forEach((entry, i) => {
-      const path = `ssh[${i}]`;
-      if (entry.includes("@")) {
-        if (domainOf(entry) !== domain) out.push(diag("error", "ssh-email-domain", e, path, outside(entry)));
-      } else if (!Object.hasOwn(groups, entry)) {
-        out.push(diag("error", "unknown-ssh-group", e, path, `SSH group "${entry}" is not in account.yaml ssh_groups (${groupHint})`));
+    const parsed: Array<WhoEntry | undefined> = list.map((v) => {
+      try {
+        return parseWhoEntry(v);
+      } catch (err) {
+        if (err instanceof ValueError) return undefined; // the loader reports it
+        throw err;
       }
     });
+    parsed.forEach((w, i) => {
+      if (!w) return;
+      const p = dottedPath([...segs, i]);
+      if (w.kind === "group" && !Object.hasOwn(groups, w.name)) {
+        out.push(diag("error", "unknown-group", e, p, `group "${w.name}" is not in account.yaml groups (${groupHint})`));
+      } else if (w.kind === "email" && domainOf(w.email) !== domain) {
+        out.push(diag("error", "email-domain", e, p, outside(w.email)));
+      } else if (w.kind === "token" && !(w.name in tokens)) {
+        out.push(diag("error", "unknown-service-token", e, p, `service token "${w.name}" is not in account.yaml cloudflare.service_tokens (${tokenHint})`));
+      } else if (where === "ssh" && (w.kind === "everyone" || w.kind === "ip")) {
+        out.push(
+          diag(
+            "error",
+            "ssh-web-only",
+            e,
+            p,
+            w.kind === "everyone"
+              ? "everyone is web only: SSH always needs a login (a group, an email or staff) or a service token"
+              : `${list[i]}: an IP range is web only; SSH goes through Cloudflare, which can't see the caller's own address. Use a service token (token:<name>) for a machine`,
+          ),
+        );
+      }
+    });
+    if (parsed.some((w) => w?.kind === "everyone") && list.length > 1) {
+      out.push(diag("error", "everyone-mixed", e, path, `everyone already lets anyone in without a login; list it alone (got [${list.join(", ")}])`));
+    }
+  };
+
+  for (const e of config.droplets) {
+    checkList(e, e.file.ssh ?? [], ["ssh"], "ssh");
+    const web = e.file.web;
+    for (const r of web?.access ?? []) checkList(e, r.who, ["web", "access", r.path], "web");
+
+    // CI deploys over SSH with a ci-* token, then checks /healthcheck/; behind a login that check fails.
+    const ciTokens = (e.file.ssh ?? []).filter((v) => v.startsWith(`token:${CI_TOKEN_PREFIX}`));
+    const health = `/${HEALTH_BYPASS_PATH}`;
+    if (web && ciTokens.length && !web.access.some((r) => normPath(r.path) === health)) {
+      const suggested = `${health}/`;
+      out.push(
+        diag(
+          "warning",
+          "ci-token-no-healthcheck",
+          e,
+          "web.access",
+          `ssh lets CI in (${ciTokens.join(", ")}) but web.access has no ${suggested}: CI's post-deploy check gets the login. Add "${suggested}": [everyone] if CI checks this droplet`,
+        ),
+      );
+    }
+
+    // A path open without a login under one that answers 404 on the extra hostnames: the tunnel's
+    // 404 rule covers everything under its path, so the open path is 404 there too.
+    const dw = web ? desiredWeb(e.file) : undefined;
+    if (dw && dw.rootOpen && dw.extraHostnames.length) {
+      const login = dw.access.filter((a) => a.norm !== "" && a.needsLogin);
+      for (const a of dw.access) {
+        if (a.needsLogin || a.norm === "") continue;
+        const parent = login.find((l) => l.norm !== a.norm && pathUnder(a.norm, l.norm));
+        if (!parent) continue;
+        out.push(
+          diag(
+            "warning",
+            "web-access-under-404",
+            e,
+            dottedPath(["web", "access", a.path]),
+            `${a.path} is under ${parent.path}, which needs a login and so answers 404 on the extra hostnames (${listNames(dw.extraHostnames)}); ${a.path} is 404 there too, and open only on ${e.file.name}`,
+          ),
+        );
+      }
+    }
   }
   return out;
 }

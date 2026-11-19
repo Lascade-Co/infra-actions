@@ -5,7 +5,7 @@
 // any failed page, a count that does not match meta.total, an empty list or droplets without
 // tags/networks throw, so nothing is planned from a partial picture.
 
-import { ApiClient, ApiError, type FetchFn } from "../core/http.js";
+import { ApiClient, type FetchFn } from "../core/http.js";
 import type { Secrets } from "../core/secrets.js";
 
 export const DO_BASE_URL = "https://api.digitalocean.com/v2";
@@ -101,28 +101,4 @@ export function checkDroplet(raw: unknown): DoDroplet {
   }
   if (typeof d.region?.slug !== "string") throw new Error(`droplet ${id} has no region slug`);
   return d as DoDroplet;
-}
-
-/** True when the tag exists (GET /v2/tags/{tag}); false on 404. */
-export async function tagExists(api: ApiClient, tag: string): Promise<boolean> {
-  try {
-    await api.get(`/tags/${encodeURIComponent(tag)}`);
-    return true;
-  } catch (e) {
-    if (e instanceof ApiError && e.status === 404) return false;
-    throw e;
-  }
-}
-
-const dropletResource = (id: number) => ({ resources: [{ resource_id: String(id), resource_type: "droplet" }] });
-
-/** Tags one droplet, creating the tag first when it does not exist. */
-export async function tagDroplet(api: ApiClient, tag: string, id: number): Promise<void> {
-  if (!(await tagExists(api, tag))) await api.request("POST", "/tags", { body: { name: tag } });
-  await api.request("POST", `/tags/${encodeURIComponent(tag)}/resources`, { body: dropletResource(id) });
-}
-
-/** Removes one tag from one droplet. The tag itself is never deleted. */
-export async function untagDroplet(api: ApiClient, tag: string, id: number): Promise<void> {
-  await api.request("DELETE", `/tags/${encodeURIComponent(tag)}/resources`, { body: dropletResource(id) });
 }
