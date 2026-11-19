@@ -76,7 +76,7 @@ The exit code is 0 for pass, 1 for fail (errors, failed stages, failed apply ops
 | `ONEUPTIME_API_KEY` | oneuptime | monitors (when `account.yaml` has a `oneuptime` section) |
 | `ONEUP_ACCESS_CLIENT_ID`, `ONEUP_ACCESS_CLIENT_SECRET` | oneuptime | the Cloudflare Access service token in front of OneUptime |
 | `TELEGRAM_BOT_TOKEN` | apply, drift, `validate --notify` | the summary to `account.yaml` `telegram.chat_id`; skipped when either is missing |
-| `TELEGRAM_CHAT_ID` | load-failure alert | optional fallback chat id when `account.yaml` is missing or unreadable (not a secret, but keep it out of this repo) |
+| `TELEGRAM_CHAT_ID` | load-failure alert | optional fallback chat id when `account.yaml` is missing or unreadable; the workflows pass the repository variable `TELEGRAM_CHAT_ID` (not a secret, but keep it out of this repo's files) |
 
 `validate` needs none. `check`, `apply` and `drift` need all but `TELEGRAM_BOT_TOKEN`; a missing one fails that module's read, and the run fails.
 

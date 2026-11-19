@@ -45,6 +45,7 @@ describe("apply.yml", () => {
     const v = (await steps("apply.yml")).find((s) => s.name?.startsWith("Validate ("))!;
     expect(secretsOf(v)).toEqual(["${{ secrets.TELEGRAM_BOT_TOKEN }}"]);
     expect(v.run).toContain("--notify apply");
+    expect(v.env?.TELEGRAM_CHAT_ID).toBe("${{ vars.TELEGRAM_CHAT_ID }}");
   });
 });
 
@@ -59,5 +60,6 @@ describe("drift.yml", () => {
     expect(v.if).toBe("steps.head.outputs.ready == 'true'");
     expect(secretsOf(v)).toEqual(["${{ secrets.TELEGRAM_BOT_TOKEN }}"]);
     expect(v.run).toContain("--notify drift");
+    expect(v.env?.TELEGRAM_CHAT_ID).toBe("${{ vars.TELEGRAM_CHAT_ID }}");
   });
 });
