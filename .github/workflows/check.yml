@@ -30,6 +30,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 concurrency:
   # A newer push to the same pull request supersedes the running check (check is read-only).
   group: infra-check-${{ github.event.client_payload.pr || inputs.pr }}
@@ -41,6 +45,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Seal job output
+        uses: Lascade-Co/actions/actions/seal@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
+
       - name: Validate inputs
         id: in
         env:
@@ -147,3 +154,6 @@ jobs:
       - name: Remove the checkouts and the report
         if: always()
         run: rm -rf "$RUNNER_TEMP/infra-head" "$RUNNER_TEMP/infra-base" "$RUNNER_TEMP/infra-report.md"
+
+      - if: always()
+        uses: Lascade-Co/actions/actions/seal-upload@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1

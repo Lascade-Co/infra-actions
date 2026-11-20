@@ -12,6 +12,7 @@ interface Step {
   if?: string;
   run?: string;
   env?: Record<string, string>;
+  with?: Record<string, string>;
 }
 
 async function steps(file: string): Promise<Step[]> {
@@ -23,9 +24,14 @@ async function steps(file: string): Promise<Step[]> {
 const secretsOf = (s: Step) => Object.values(s.env ?? {}).filter((v) => v.includes("secrets."));
 
 describe("apply.yml", () => {
-  it("first refuses unless INFRA_APPLY_ENABLED is true, before any checkout or secret", async () => {
+  it("first (after the seal step) refuses unless INFRA_APPLY_ENABLED is true, before any checkout or secret", async () => {
     const all = await steps("apply.yml");
-    const gate = all[0]!;
+    // The seal step uses only the job token: no with, no env, so no secret before the switch.
+    const seal = all[0]!;
+    expect(seal.uses).toMatch(/^Lascade-Co\/actions\/actions\/seal@[0-9a-f]{40}$/);
+    expect(seal.with).toBeUndefined();
+    expect(seal.env).toBeUndefined();
+    const gate = all[1]!;
     expect(gate.env).toEqual({ ENABLED: "${{ vars.INFRA_APPLY_ENABLED }}" });
     expect(gate.run).toContain('[ "$ENABLED" != "true" ]');
     expect(gate.run).toContain("exit 1");

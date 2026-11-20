@@ -5,7 +5,8 @@
 # apply at a time, never cancelled. The tool is all-or-nothing and sends the Telegram summary
 # itself.
 #
-# Two gates before anything is fetched or any token is used:
+# Two gates before infra is fetched or any secret is used (the seal step runs first, with only the
+# job token, contents: read):
 #   - the switch: the repository variable INFRA_APPLY_ENABLED must be exactly "true". Until the
 #     switch-over (phase E) it is unset, so a push or merge to infra's main applies nothing;
 #   - the tip: the dispatched commit must be the current head of infra's main (checked again
@@ -33,6 +34,10 @@ on:
 permissions:
   contents: read
 
+defaults:
+  run:
+    shell: "seal-bash-e {0}"
+
 concurrency:
   group: infra-apply
   cancel-in-progress: false
@@ -43,7 +48,14 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      # First step, before any checkout or secret: fails the run loudly when applies are off.
+      # The seal step comes first. It reads only this repo's public key, with the job token
+      # (contents: read) and no secret, so nothing of infra is fetched and no secret is used
+      # before the switch.
+      - name: Seal job output
+        uses: Lascade-Co/actions/actions/seal@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
+
+      # First step after the seal, before any checkout or secret: fails the run loudly when applies
+      # are off.
       - name: Applies must be switched on (INFRA_APPLY_ENABLED)
         env:
           ENABLED: ${{ vars.INFRA_APPLY_ENABLED }}
@@ -149,3 +161,6 @@ jobs:
       - name: Remove the checkouts and the reports
         if: always()
         run: rm -rf "$RUNNER_TEMP/infra-head" "$RUNNER_TEMP/infra-base" "$RUNNER_TEMP/infra-report.md" "$RUNNER_TEMP/infra-validate.md"
+
+      - if: always()
+        uses: Lascade-Co/actions/actions/seal-upload@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
