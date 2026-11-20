@@ -310,13 +310,13 @@ See [`examples/infra/`](examples/infra/) for a complete fake checkout.
 | `test.yml` | push, pull request | `npm ci`, typecheck, tests. No secrets. |
 | `check.yml` | `repository_dispatch` `infra-check` (`pr`, `head_sha`, `base_sha`) from infra's `dispatch-check`, or by hand | fetches the PR head (`refs/pull/<pr>/head`, must equal `head_sha`) and the base, runs `check --base`, posts or updates the one plan comment (`<!-- infra-actions:plan -->`) on the infra PR, and sets the commit status `infra-actions/check` |
 | `apply.yml` | `repository_dispatch` `infra-apply` (`sha`, `before`) from infra's `dispatch-apply`, or by hand | first (after the seal step) fails unless the repository variable `INFRA_APPLY_ENABLED` is `true` (see "Switch-over"); the commit must be the **head** of infra's `main` (checked before the fetch and again right before the apply, so a stale or out-of-order dispatch applies nothing); `validate --notify apply` with only the Telegram token and chat, then `apply --base <before>`. One concurrency group `infra-apply`, never cancelled. Telegram summary from the tool. |
-| `drift.yml` | daily 03:30 UTC, or by hand | ends early with a success and a one-line notice while infra's `main` has no `account.yaml`; otherwise `validate --notify drift` with only the Telegram token and chat, then `drift` on infra's `main`. Telegram summary from the tool. |
+| `drift.yml` | daily 03:30 UTC, or by hand | ends early with a success while infra's `main` has no `account.yaml` (the message is in the sealed log at https://ci.lascade.com/?repo=infra-actions); otherwise `validate --notify drift` with only the Telegram token and chat, then `drift` on infra's `main`. Telegram summary from the tool. |
 
 ### Switch-over (phase E)
 
 Until the switch-over, an accidental push or merge to infra's `main` must apply nothing. Two things hold it:
 
-- **The apply switch.** `apply.yml` fails loudly, as its first step after the seal step and before any checkout or secret, unless the repository variable `INFRA_APPLY_ENABLED` of this repo is exactly `true`. It is **not set** before phase E.
+- **The apply switch.** `apply.yml` fails the run (the message is in the sealed log at https://ci.lascade.com/?repo=infra-actions), as its first step after the seal step and before any checkout or secret, unless the repository variable `INFRA_APPLY_ENABLED` of this repo is exactly `true`. It is **not set** before phase E.
 - **No `account.yaml` on infra's `main`.** The exported files live on a branch with a draft PR until phase E; `drift.yml` skips quietly until `account.yaml` reaches `main`.
 
 At the switch-over, in this order:

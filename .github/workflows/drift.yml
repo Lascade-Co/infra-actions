@@ -1,7 +1,8 @@
 # Daily drift report, read-only: droplets with no file, hand-made changes, the GitHub token's
 # expiry. The tool sends the summary to Telegram; the log shows counts and pass/fail only.
 # Until infra's main has an account.yaml (it arrives at the switch-over, phase E) the run ends
-# early with a success and a one-line note.
+# early with a success (the message is in the sealed log at
+# https://ci.lascade.com/?repo=infra-actions).
 name: drift
 
 on:

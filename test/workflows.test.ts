@@ -27,10 +27,14 @@ describe("apply.yml", () => {
   it("first (after the seal step) refuses unless INFRA_APPLY_ENABLED is true, before any checkout or secret", async () => {
     const all = await steps("apply.yml");
     // The seal step uses only the job token: no with, no env, so no secret before the switch.
+    // It is pinned to a full commit SHA or the seal-v1 tag, and seal-upload uses the same ref.
     const seal = all[0]!;
-    expect(seal.uses).toMatch(/^Lascade-Co\/actions\/actions\/seal@[0-9a-f]{40}$/);
+    const ref = /^Lascade-Co\/actions\/actions\/seal@([0-9a-f]{40}|seal-v1)$/.exec(seal.uses ?? "")?.[1];
+    expect(ref).toBeDefined();
+    expect(seal.if).toBeUndefined();
     expect(seal.with).toBeUndefined();
     expect(seal.env).toBeUndefined();
+    expect(all.at(-1)).toEqual({ if: "always()", uses: `Lascade-Co/actions/actions/seal-upload@${ref}` });
     const gate = all[1]!;
     expect(gate.env).toEqual({ ENABLED: "${{ vars.INFRA_APPLY_ENABLED }}" });
     expect(gate.run).toContain('[ "$ENABLED" != "true" ]');

@@ -19,6 +19,7 @@ jobs:
     steps:
       - name: Seal job output
         uses: Lascade-Co/actions/actions/seal@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false

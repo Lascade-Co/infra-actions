@@ -54,8 +54,8 @@ jobs:
       - name: Seal job output
         uses: Lascade-Co/actions/actions/seal@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
 
-      # First step after the seal, before any checkout or secret: fails the run loudly when applies
-      # are off.
+      # First step after the seal, before any checkout or secret: when applies are off it fails the
+      # run (the message is in the sealed log at https://ci.lascade.com/?repo=infra-actions).
       - name: Applies must be switched on (INFRA_APPLY_ENABLED)
         env:
           ENABLED: ${{ vars.INFRA_APPLY_ENABLED }}
