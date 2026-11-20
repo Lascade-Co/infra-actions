@@ -28,7 +28,7 @@ jobs:
     timeout-minutes: 15
     steps:
       - name: Seal job output
-        uses: Lascade-Co/actions/actions/seal@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
+        uses: Lascade-Co/actions/actions/seal@5bc5286391d635d3b8fa0a9c0a1a23fc61a07e5e # seal-v1
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -94,4 +94,4 @@ jobs:
         run: rm -rf "$RUNNER_TEMP/infra-head" "$RUNNER_TEMP/infra-report.md" "$RUNNER_TEMP/infra-validate.md"
 
       - if: always()
-        uses: Lascade-Co/actions/actions/seal-upload@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
+        uses: Lascade-Co/actions/actions/seal-upload@5bc5286391d635d3b8fa0a9c0a1a23fc61a07e5e # seal-v1

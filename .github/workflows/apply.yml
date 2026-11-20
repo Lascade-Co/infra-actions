@@ -52,7 +52,7 @@ jobs:
       # (contents: read) and no secret, so nothing of infra is fetched and no secret is used
       # before the switch.
       - name: Seal job output
-        uses: Lascade-Co/actions/actions/seal@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
+        uses: Lascade-Co/actions/actions/seal@5bc5286391d635d3b8fa0a9c0a1a23fc61a07e5e # seal-v1
 
       # First step after the seal, before any checkout or secret: when applies are off it fails the
       # run (the message is in the sealed log at https://ci.lascade.com/?repo=infra-actions).
@@ -163,4 +163,4 @@ jobs:
         run: rm -rf "$RUNNER_TEMP/infra-head" "$RUNNER_TEMP/infra-base" "$RUNNER_TEMP/infra-report.md" "$RUNNER_TEMP/infra-validate.md"
 
       - if: always()
-        uses: Lascade-Co/actions/actions/seal-upload@ef8adb13b1e2cc83d812fbe993ee5fc6f0b17744 # seal-v1
+        uses: Lascade-Co/actions/actions/seal-upload@5bc5286391d635d3b8fa0a9c0a1a23fc61a07e5e # seal-v1
